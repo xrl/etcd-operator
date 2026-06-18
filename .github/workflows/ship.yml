@@ -71,8 +71,17 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      # Build each per-arch image once from the prebuilt binary, then push the same
-      # image to both registries under <reg>/...:<TAG>-<arch>.
+      # buildx is required so each per-arch image is stamped with the correct OCI
+      # platform metadata (config.architecture). A plain `docker build` on the amd64
+      # runner stamps architecture=amd64 regardless of which binary is COPY'd, which
+      # makes the stitched manifest list advertise two amd64 entries and no arm64.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build each per-arch image once from the prebuilt binary and push it to both
+      # registries under <reg>/...:<TAG>-<arch>. `--platform linux/$ARCH` forces the
+      # correct base-image variant + architecture metadata so the arm64 image is
+      # genuinely arm64 (not an amd64-stamped image holding an arm64 binary).
       - name: Build and push per-arch images
         env:
           TAG: ${{ github.ref_name }}
@@ -80,15 +89,18 @@ jobs:
           set -euo pipefail
           for ARCH in amd64 arm64; do
             echo "::group::package $ARCH"
-            docker build -f Dockerfile.ship --build-arg TARGETARCH="$ARCH" \
+            docker buildx build -f Dockerfile.ship \
+              --platform "linux/${ARCH}" \
+              --build-arg TARGETARCH="$ARCH" \
               -t "${GHCR_IMAGE}:${TAG}-${ARCH}" \
-              -t "${DOCKER_IMAGE}:${TAG}-${ARCH}" .
-            docker push "${GHCR_IMAGE}:${TAG}-${ARCH}"
-            docker push "${DOCKER_IMAGE}:${TAG}-${ARCH}"
+              -t "${DOCKER_IMAGE}:${TAG}-${ARCH}" \
+              --push .
             echo "::endgroup::"
           done
 
       # LAWS-1: stitch the per-arch images into one multi-arch manifest per registry.
+      # buildx imagetools reads each source image's real platform from its config, so
+      # the resulting list carries one linux/amd64 and one linux/arm64 entry.
       - name: Stitch and push manifests
         id: stitch
         env:
@@ -96,10 +108,9 @@ jobs:
         run: |
           set -euo pipefail
           for IMAGE in "${GHCR_IMAGE}" "${DOCKER_IMAGE}"; do
-            docker manifest create "${IMAGE}:${TAG}" \
-              --amend "${IMAGE}:${TAG}-amd64" \
-              --amend "${IMAGE}:${TAG}-arm64"
-            docker manifest push "${IMAGE}:${TAG}"
+            docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+              "${IMAGE}:${TAG}-amd64" \
+              "${IMAGE}:${TAG}-arm64"
           done
           # Resolve the pushed multi-arch digest (identical content => identical digest).
           GHCR_DIGEST="$(docker buildx imagetools inspect "${GHCR_IMAGE}:${TAG}" \
