@@ -65,6 +65,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var maxConcurrentReconciles int
+	var etcdCPURequest string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&imageRegistry, "image-registry", "gcr.io/etcd-development/etcd",
 		"The container registry to pull etcd images from. Defaults to gcr.io/etcd-development/etcd.")
@@ -85,6 +86,11 @@ func main() {
 			"small pool (default 5) improves multi-cluster throughput. Going higher increases "+
 			"simultaneous apiserver and managed-etcd load, so tune it for your fleet. A value <= 0 "+
 			"falls back to controller-runtime's default of 1.")
+	flag.StringVar(&etcdCPURequest, "etcd-cpu-request", controller.DefaultEtcdCPURequest,
+		"CPU request set on the etcd container. A request (not a limit) lifts the etcd pod from "+
+			"BestEffort to Burstable QoS and raises its cpu.shares floor without ever throttling "+
+			"etcd. Set to \"\" or \"0\" to apply no request (original BestEffort behavior) so the "+
+			"effect can be A/B-measured. Defaults to "+controller.DefaultEtcdCPURequest+".")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -92,6 +98,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Apply the etcd CPU request knob to the controller package. This is an
+	// operator-wide tuning lever (identical for every cluster), so it is a flag
+	// rather than a CRD field. See controller.EtcdCPURequest.
+	controller.EtcdCPURequest = etcdCPURequest
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
