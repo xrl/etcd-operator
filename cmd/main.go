@@ -64,6 +64,8 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var maxConcurrentReconciles int
+	var etcdCPURequest string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&imageRegistry, "image-registry", "gcr.io/etcd-development/etcd",
 		"The container registry to pull etcd images from. Defaults to gcr.io/etcd-development/etcd.")
@@ -77,6 +79,18 @@ func main() {
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
+		"Number of reconcile workers run in parallel. Each EtcdCluster is keyed on its own "+
+			"workqueue entry, so a single cluster is never reconciled by two workers at once; this "+
+			"only parallelizes distinct clusters. Reconciles are relatively heavy/long-running, so a "+
+			"small pool (default 5) improves multi-cluster throughput. Going higher increases "+
+			"simultaneous apiserver and managed-etcd load, so tune it for your fleet. A value <= 0 "+
+			"falls back to controller-runtime's default of 1.")
+	flag.StringVar(&etcdCPURequest, "etcd-cpu-request", controller.DefaultEtcdCPURequest,
+		"CPU request set on the etcd container. A request (not a limit) lifts the etcd pod from "+
+			"BestEffort to Burstable QoS and raises its cpu.shares floor without ever throttling "+
+			"etcd. Set to \"\" or \"0\" to apply no request (original BestEffort behavior) so the "+
+			"effect can be A/B-measured. Defaults to "+controller.DefaultEtcdCPURequest+".")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -84,6 +98,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Apply the etcd CPU request knob to the controller package. This is an
+	// operator-wide tuning lever (identical for every cluster), so it is a flag
+	// rather than a CRD field. See controller.EtcdCPURequest.
+	controller.EtcdCPURequest = etcdCPURequest
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -151,9 +170,10 @@ func main() {
 	}
 
 	if err = (&controller.EtcdClusterReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		ImageRegistry: imageRegistry,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		ImageRegistry:           imageRegistry,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdCluster")
 		os.Exit(1)
