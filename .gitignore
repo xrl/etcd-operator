@@ -28,3 +28,6 @@ go.work
 
 # macOS
 .DS_Store
+
+# build output (ship pipeline) — per-arch manager binaries, not the committed installers
+dist/manager-*
