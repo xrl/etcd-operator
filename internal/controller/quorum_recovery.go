@@ -357,8 +357,10 @@ func (r *EtcdClusterReconciler) recoveryRebuild(
 	}
 
 	// Force-new-cluster is injected; check whether the single survivor is healthy.
-	singleEndpoint := []string{clientEndpointForOrdinalIndex(sts, 0)}
-	health, healthErr := r.clusterHealth(singleEndpoint)
+	// The endpoint scheme and health dial must follow the cluster's client TLS
+	// surface (cleartext vs https) exactly as every other health path does.
+	singleEndpoint := []string{clientEndpointForOrdinalIndex(sts, 0, clientScheme(s.cluster))}
+	health, healthErr := r.clusterHealth(ctx, s.cluster, singleEndpoint)
 	if healthErr != nil || len(health) == 0 || !health[0].Health || health[0].Status == nil {
 		logger.Info("Rebuild step 2: waiting for survivor to bootstrap single-member cluster",
 			"healthErr", healthErr)
