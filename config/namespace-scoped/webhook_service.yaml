@@ -1,0 +1,22 @@
+---
+# Webhook serving Service for the namespace-scoped deployment. Authored from
+# config/webhook/service.yaml. The overlay runs the webhook SERVER in-pod
+# (deploy design A.5 / D4 Option B) and needs this Service for the API server to
+# reach it, but intentionally does NOT include the cluster-scoped
+# Validating/MutatingWebhookConfigurations (those are emitted by the separate
+# CRD-install lane, config/webhook-install/, with namespaceSelector{kv}).
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-service
+  namespace: system
+  labels:
+    app.kubernetes.io/name: etcd-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    control-plane: controller-manager

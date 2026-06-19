@@ -1,0 +1,31 @@
+---
+# Operator self-metrics ServiceMonitor for the namespace-scoped deployment.
+# This is a REWRITE of config/prometheus/monitor.yaml, not a relabel (deploy
+# design A.4 / H2). Under --metrics-secure=false the operator serves plain HTTP
+# on :8080, so the stock https+bearerToken+tlsConfig endpoint would make every
+# scrape error and the target show DOWN. Differences vs stock:
+#   - endpoint scheme http, port http (8080); no bearerTokenFile, no tlsConfig.
+#   - label release: kvs-prometheus — the ONLY label the kv `kvs-prometheus`
+#     Prometheus selects on (serviceMonitorSelector release: kvs-prometheus,
+#     same-namespace-only). DP-2: verify against the live kv Prometheus CR.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: etcd-operator
+    app.kubernetes.io/managed-by: kustomize
+    # <DP-2 PROMETHEUS_RELEASE_SELECTOR>: confirmed default for kvs-prometheus
+    # (chart 65.1.1, serviceMonitorSelectorNilUsesHelmValues:true). Verify on
+    # the live kv Prometheus CR before merge.
+    release: kvs-prometheus
+  name: controller-manager-metrics-monitor
+  namespace: system
+spec:
+  endpoints:
+    - path: /metrics
+      port: http
+      scheme: http
+  selector:
+    matchLabels:
+      control-plane: controller-manager

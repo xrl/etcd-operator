@@ -1,0 +1,31 @@
+---
+# NetworkPolicy for the namespace-scoped deployment. Authored from
+# config/network-policy/allow-metrics-traffic.yaml but gates the HTTP metrics
+# port :8080 (operator runs --metrics-secure=false). See deploy design A.4 (H3).
+# Ingress is allowed from namespaces labeled `metrics: enabled`; since the kv
+# Prometheus (kvs-prometheus) scrapes from the SAME namespace (kv) as the target
+# (D10 same-namespace topology), label ns kv with `metrics: enabled` (done in
+# the kustomization namespace stanza is not possible — label the Namespace via
+# the App-2 CreateNamespace path or a Namespace manifest; see overlay README).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: etcd-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-metrics-traffic
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled
+      ports:
+        - port: 8080
+          protocol: TCP

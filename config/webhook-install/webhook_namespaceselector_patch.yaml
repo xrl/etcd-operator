@@ -1,0 +1,10 @@
+# Constrain a fail-closed WebhookConfiguration to the kv namespace only.
+# Without this, a cluster-wide failurePolicy: Fail webhook backed by a kv-only
+# operator rejects EtcdCluster writes in EVERY namespace when the operator is
+# down (deploy design D4). The matchLabels uses the immutable namespace label
+# kubernetes.io/metadata.name (set by the API server on every Namespace).
+- op: add
+  path: /webhooks/0/namespaceSelector
+  value:
+    matchLabels:
+      kubernetes.io/metadata.name: kv

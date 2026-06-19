@@ -1,0 +1,47 @@
+---
+# Strategic-merge patch over the manager Deployment for the namespace-scoped
+# ndp-us-dev deployment. See deploy design A.2/A.4/D8/D9.
+#
+# args: replaces the whole args list (strategic merge replaces the list wholesale).
+#   - --watch-namespace=kv : scope the manager cache to kv (cmd/main.go A.1).
+#   - --metrics-secure=false + --metrics-bind-address=:8080 : serve metrics over
+#     plain HTTP on :8080 so no cluster-scoped TokenReview/SubjectAccessReview
+#     (metrics-auth-role) is needed; the port is NetworkPolicy-gated (A.4/D9).
+#   - --leader-elect : leader election Lease is namespaced (lands in kv).
+#   - --health-probe-bind-address : unchanged.
+#
+# env:
+#   - WATCH_NAMESPACE=kv : same effect as the flag, kept for belt-and-suspenders.
+#   - RESTRICT_CLUSTER_ISSUER=true : turns on the admission guard that rejects
+#     issuerKind=ClusterIssuer (webhook A.3/D3).
+#   - OPERATOR_IMAGE : the restore init-container image. kustomize images: does
+#     NOT rewrite env values, so it must be pinned by digest here too (D8/H6).
+#     <DP-1 ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST> = the Docker Hub pull-through
+#     Artifactory host (precedent: kvs-docker-prod.docker.artifactory.viasat.com)
+#     — UNCONFIRMED, must be set before vendoring.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        args:
+        - --watch-namespace=kv
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-secure=false
+        - --metrics-bind-address=:8080
+        env:
+        - name: WATCH_NAMESPACE
+          value: "kv"
+        - name: RESTRICT_CLUSTER_ISSUER
+          value: "true"
+        - name: OPERATOR_IMAGE
+          # DP-1: replace <ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST> with the
+          # confirmed Docker Hub pull-through host. Digest is the published
+          # v0.1.0-pre.1 operator image (identical on ghcr.io + docker.io, D12).
+          value: "<DP-1 ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST>/xrlx/etcd-operator@sha256:7e64f28cb9f2884e4bb225314292f9d20743213f3845a069a979970645fd8728"

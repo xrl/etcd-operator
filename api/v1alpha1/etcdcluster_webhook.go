@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -340,6 +341,16 @@ func validateVersionFormat(version string, path *field.Path) field.ErrorList {
 	return nil
 }
 
+// restrictClusterIssuer reports whether this deployment forbids
+// issuerKind=ClusterIssuer at admission. It is true only when the operator is
+// run with RESTRICT_CLUSTER_ISSUER=true (set by the downstream namespace-scoped
+// overlay's manager patch). When unset, the upstream behavior is preserved: the
+// CEL enum still accepts both Issuer and ClusterIssuer. See the deploy design
+// D3/A.3 for why the namespace-scoped deployment must reject ClusterIssuer.
+func restrictClusterIssuer() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("RESTRICT_CLUSTER_ISSUER")), "true")
+}
+
 // validateTLS validates the two independent TLS surfaces (peer and client) of an
 // EtcdCluster. The TLS API was reshaped from a single TLSCertificate into
 // EtcdClusterTLS{Peer, Client *TLSSurface}: each surface carries its own provider
@@ -402,6 +413,21 @@ func validateTLSSurface(tls *TLSSurface, path *field.Path) field.ErrorList {
 			errs = append(errs, field.NotSupported(
 				cfgPath.Child("certManagerCfg").Child("issuerKind"),
 				cm.IssuerKind, []string{"Issuer", "ClusterIssuer"}))
+		} else if restrictClusterIssuer() && strings.TrimSpace(cm.IssuerKind) == "ClusterIssuer" {
+			// Downstream ndp-us-dev namespace-scoped deployment (see the deploy
+			// design D3/A.3): the operator runs with only a namespaced Role and
+			// has no RBAC to read cluster-scoped ClusterIssuers. Without this
+			// admission guard a CR with issuerKind=ClusterIssuer passes the cache
+			// but fails RBAC mid-reconcile with a confusing Forbidden that wedges
+			// the reconcile loop. Reject it cleanly at write time instead. Gated
+			// on RESTRICT_CLUSTER_ISSUER=true so upstream behavior (both kinds
+			// accepted) is unchanged when the env var is absent.
+			errs = append(errs, field.Invalid(
+				cfgPath.Child("certManagerCfg").Child("issuerKind"),
+				cm.IssuerKind,
+				"issuerKind \"ClusterIssuer\" is not permitted in this deployment: the operator is "+
+					"namespace-scoped and cannot read cluster-scoped ClusterIssuers. Use a namespaced "+
+					"Issuer in the EtcdCluster's namespace instead."))
 		}
 		errs = append(errs, validateCommonName(cm.CommonName,
 			cfgPath.Child("certManagerCfg").Child("commonName"))...)

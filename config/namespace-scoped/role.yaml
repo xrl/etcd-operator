@@ -1,0 +1,132 @@
+---
+# Namespaced Role authored from config/rbac/role.yaml (the upstream ClusterRole)
+# for the ndp-us-dev namespace-scoped deployment. Differences vs the upstream
+# ClusterRole (see deploy design A.2/D2/D3):
+#   - kind ClusterRole -> Role, pinned to namespace kv (the overlay namespace).
+#   - the cert-manager `clusterissuers` rule is DROPPED (cluster-scoped read the
+#     namespaced operator must never make; issuerKind=ClusterIssuer is rejected
+#     at admission instead — see RESTRICT_CLUSTER_ISSUER guard).
+#   - no PVC verbs (STS volumeClaimTemplates are expanded by kube-controller-manager).
+#   - no metrics-auth-role (metrics served insecure over http:8080, see A.4/D9).
+# Every remaining rule is namespaced.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: kv
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - certificates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cert-manager.io
+  resources:
+  # clusterissuers DROPPED here vs upstream role.yaml (cluster-scoped).
+  - issuers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - podmonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups
+  - etcdclusters
+  - etcdrestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups/finalizers
+  - etcdclusters/finalizers
+  - etcdrestores/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups/status
+  - etcdclusters/status
+  - etcdrestores/status
+  verbs:
+  - get
+  - patch
+  - update

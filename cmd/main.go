@@ -27,6 +27,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -77,6 +78,7 @@ func main() {
 	var enableHTTP2 bool
 	var maxConcurrentReconciles int
 	var etcdCPURequest string
+	var watchNamespace string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&imageRegistry, "image-registry", "gcr.io/etcd-development/etcd",
 		"The container registry to pull etcd images from. Defaults to gcr.io/etcd-development/etcd.")
@@ -105,6 +107,14 @@ func main() {
 			"BestEffort to Burstable QoS and raises its cpu.shares floor without ever throttling "+
 			"etcd. Set to \"\" or \"0\" to apply no request (original BestEffort behavior) so the "+
 			"effect can be A/B-measured. Defaults to "+controller.DefaultEtcdCPURequest+".")
+	flag.StringVar(&watchNamespace, "watch-namespace", os.Getenv("WATCH_NAMESPACE"),
+		"If set, restrict the manager cache/watches to this single namespace. When empty the "+
+			"manager caches cluster-wide (upstream default). The downstream ndp-us-dev deploy sets "+
+			"this to \"kv\" so the operator's cache/informers only touch the kv namespace, which "+
+			"(together with the namespaced Role) keeps the operator identity purely namespaced. "+
+			"NOTE: this scopes the cache only; controller-runtime still builds a global cluster "+
+			"cache, so cluster-scoped reads (e.g. a ClusterIssuer) are stopped by RBAC, not by this "+
+			"flag — the admission guard rejecting issuerKind=ClusterIssuer is what makes that safe.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -163,7 +173,7 @@ func main() {
 		// this setup is not recommended for production.
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -181,7 +191,21 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+
+	// When --watch-namespace (or WATCH_NAMESPACE) is set, scope the manager's
+	// cache to that single namespace via DefaultNamespaces. This narrows every
+	// informer LIST/WATCH the manager issues to the one namespace, so the
+	// operator runs against a namespaced Role instead of a ClusterRole. Leaving
+	// it empty preserves the upstream cluster-wide behavior.
+	if watchNamespace != "" {
+		setupLog.Info("restricting manager cache to a single namespace", "namespace", watchNamespace)
+		mgrOptions.Cache = cache.Options{
+			DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)

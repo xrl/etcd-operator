@@ -1,0 +1,21 @@
+---
+# Metrics Service for the namespace-scoped deployment. Authored from
+# config/default/metrics_service.yaml but exposes HTTP on :8080 (the operator
+# runs with --metrics-secure=false). See deploy design A.4 (H2/H3).
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: etcd-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: controller-manager-metrics-service
+  namespace: system
+spec:
+  ports:
+  - name: http
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    control-plane: controller-manager

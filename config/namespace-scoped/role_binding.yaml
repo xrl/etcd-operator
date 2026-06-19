@@ -1,0 +1,19 @@
+---
+# Namespaced RoleBinding authored from config/rbac/role_binding.yaml.
+# ClusterRoleBinding -> RoleBinding, roleRef kind ClusterRole -> Role, pinned to kv.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: manager-rolebinding
+  namespace: kv
+  labels:
+    app.kubernetes.io/name: etcd-operator
+    app.kubernetes.io/managed-by: kustomize
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: manager-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: kv
