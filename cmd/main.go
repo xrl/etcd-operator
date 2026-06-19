@@ -35,6 +35,7 @@ import (
 
 	operatorv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
 	"go.etcd.io/etcd-operator/internal/controller"
+	"go.etcd.io/etcd-operator/internal/metrics"
 	// nolint:gci
 	// +kubebuilder:scaffold:imports
 )
@@ -116,6 +117,10 @@ func main() {
 	// operator-wide tuning lever (identical for every cluster), so it is a flag
 	// rather than a CRD field. See controller.EtcdCPURequest.
 	controller.EtcdCPURequest = etcdCPURequest
+
+	// Register the operator's custom per-cluster domain metrics with the
+	// controller-runtime global registry so they are served on /metrics.
+	metrics.MustRegister()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
