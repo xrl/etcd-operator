@@ -136,53 +136,53 @@ func TestValidateTLS_Messages(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		tls         *TLSCertificate
+		tls         *EtcdClusterTLS
 		wantOK      bool
 		wantMessage string
 	}{
 		{
 			name:   "auto provider with no config is valid",
-			tls:    &TLSCertificate{Provider: "auto"},
+			tls:    &EtcdClusterTLS{Client: &TLSSurface{Provider: "auto"}},
 			wantOK: true,
 		},
 		{
 			name:   "empty provider is treated as auto and is valid",
-			tls:    &TLSCertificate{},
+			tls:    &EtcdClusterTLS{Client: &TLSSurface{}},
 			wantOK: true,
 		},
 		{
 			name:        "unknown provider lists the supported choices",
-			tls:         &TLSCertificate{Provider: "vault"},
-			wantMessage: "spec.tls.provider: Unsupported value: \"vault\": supported values: \"auto\", \"cert-manager\"",
+			tls:         &EtcdClusterTLS{Client: &TLSSurface{Provider: "vault"}},
+			wantMessage: "spec.tls.client.provider: Unsupported value: \"vault\": supported values: \"auto\", \"cert-manager\"",
 		},
 		{
 			name:        "cert-manager provider without config block",
-			tls:         &TLSCertificate{Provider: "cert-manager"},
-			wantMessage: "spec.tls.providerCfg.certManagerCfg: Required value: providerCfg.certManagerCfg is required when provider is \"cert-manager\"; supply issuerKind and issuerName.",
+			tls:         &EtcdClusterTLS{Client: &TLSSurface{Provider: "cert-manager"}},
+			wantMessage: "spec.tls.client.providerCfg.certManagerCfg: Required value: providerCfg.certManagerCfg is required when provider is \"cert-manager\"; supply issuerKind and issuerName.",
 		},
 		{
 			name: "cert-manager provider missing issuerName",
-			tls: &TLSCertificate{
+			tls: &EtcdClusterTLS{Client: &TLSSurface{
 				Provider:    "cert-manager",
 				ProviderCfg: ProviderConfig{CertManagerCfg: &ProviderCertManagerConfig{IssuerKind: "Issuer"}},
-			},
-			wantMessage: "spec.tls.providerCfg.certManagerCfg.issuerName: Required value: issuerName is required for the cert-manager provider; set it to the name of an Issuer or ClusterIssuer.",
+			}},
+			wantMessage: "spec.tls.client.providerCfg.certManagerCfg.issuerName: Required value: issuerName is required for the cert-manager provider; set it to the name of an Issuer or ClusterIssuer.",
 		},
 		{
 			name: "cert-manager provider with bad issuerKind",
-			tls: &TLSCertificate{
+			tls: &EtcdClusterTLS{Client: &TLSSurface{
 				Provider:    "cert-manager",
 				ProviderCfg: ProviderConfig{CertManagerCfg: &ProviderCertManagerConfig{IssuerKind: "Bogus", IssuerName: "ca"}},
-			},
-			wantMessage: "spec.tls.providerCfg.certManagerCfg.issuerKind: Unsupported value: \"Bogus\": supported values: \"Issuer\", \"ClusterIssuer\"",
+			}},
+			wantMessage: "spec.tls.client.providerCfg.certManagerCfg.issuerKind: Unsupported value: \"Bogus\": supported values: \"Issuer\", \"ClusterIssuer\"",
 		},
 		{
 			name: "auto provider must not carry cert-manager config",
-			tls: &TLSCertificate{
+			tls: &EtcdClusterTLS{Client: &TLSSurface{
 				Provider:    "auto",
 				ProviderCfg: ProviderConfig{CertManagerCfg: &ProviderCertManagerConfig{IssuerName: "ca"}},
-			},
-			wantMessage: "spec.tls.providerCfg.certManagerCfg: Invalid value: \"<set>\": providerCfg.certManagerCfg must not be set when provider is \"auto\"; either remove providerCfg.certManagerCfg or set provider to \"cert-manager\".",
+			}},
+			wantMessage: "spec.tls.client.providerCfg.certManagerCfg: Invalid value: \"<set>\": providerCfg.certManagerCfg must not be set when provider is \"auto\"; either remove providerCfg.certManagerCfg or set provider to \"cert-manager\".",
 		},
 	}
 
@@ -306,7 +306,7 @@ func TestValidateUpdate_LegacyClustersRemediable(t *testing.T) {
 		// (TLS) edit must not be rejected for the pre-existing even size.
 		old := newCluster(4, "3.6.1")
 		updated := newCluster(4, "3.6.1")
-		updated.Spec.TLS = &TLSCertificate{Provider: "auto"}
+		updated.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{Provider: "auto"}}
 		if _, err := v.ValidateUpdate(ctx, old, updated); err != nil {
 			t.Fatalf("expected unrelated edit on legacy even-sized cluster to be allowed, got: %v", err)
 		}
@@ -433,23 +433,23 @@ func TestDefault_TLSProvider(t *testing.T) {
 
 	t.Run("empty provider defaults to auto", func(t *testing.T) {
 		c := newCluster(3, "3.6.1")
-		c.Spec.TLS = &TLSCertificate{}
+		c.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{}}
 		if err := d.Default(context.Background(), c); err != nil {
 			t.Fatalf("Default returned error: %v", err)
 		}
-		if c.Spec.TLS.Provider != "auto" {
-			t.Fatalf("expected provider to default to \"auto\", got %q", c.Spec.TLS.Provider)
+		if c.Spec.TLS.Client.Provider != "auto" {
+			t.Fatalf("expected provider to default to \"auto\", got %q", c.Spec.TLS.Client.Provider)
 		}
 	})
 
 	t.Run("explicit provider is preserved", func(t *testing.T) {
 		c := newCluster(3, "3.6.1")
-		c.Spec.TLS = &TLSCertificate{Provider: "cert-manager"}
+		c.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{Provider: "cert-manager"}}
 		if err := d.Default(context.Background(), c); err != nil {
 			t.Fatalf("Default returned error: %v", err)
 		}
-		if c.Spec.TLS.Provider != "cert-manager" {
-			t.Fatalf("expected provider preserved, got %q", c.Spec.TLS.Provider)
+		if c.Spec.TLS.Client.Provider != "cert-manager" {
+			t.Fatalf("expected provider preserved, got %q", c.Spec.TLS.Client.Provider)
 		}
 	})
 
@@ -587,36 +587,36 @@ func TestValidateCommonName_Messages(t *testing.T) {
 
 	t.Run("auto provider commonName over 64 chars is rejected", func(t *testing.T) {
 		c := newCluster(3, "3.6.1")
-		c.Spec.TLS = &TLSCertificate{
+		c.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{
 			Provider:    "auto",
 			ProviderCfg: ProviderConfig{AutoCfg: &ProviderAutoConfig{CommonConfig: CommonConfig{CommonName: tooLong}}},
-		}
+		}}
 		_, err := v.ValidateCreate(ctx, c)
 		assertCause(t, err,
-			"spec.tls.providerCfg.autoCfg.commonName: Invalid value: \""+tooLong+"\": commonName must be 64 characters or fewer to produce a valid X.509 CSR; got 65. Shorten commonName (the certificate provider derives a default when it is empty).")
+			"spec.tls.client.providerCfg.autoCfg.commonName: Invalid value: \""+tooLong+"\": commonName must be 64 characters or fewer to produce a valid X.509 CSR; got 65. Shorten commonName (the certificate provider derives a default when it is empty).")
 	})
 
 	t.Run("cert-manager provider commonName over 64 chars is rejected", func(t *testing.T) {
 		c := newCluster(3, "3.6.1")
-		c.Spec.TLS = &TLSCertificate{
+		c.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{
 			Provider: "cert-manager",
 			ProviderCfg: ProviderConfig{CertManagerCfg: &ProviderCertManagerConfig{
 				IssuerName:   "ca",
 				IssuerKind:   "Issuer",
 				CommonConfig: CommonConfig{CommonName: tooLong},
 			}},
-		}
+		}}
 		_, err := v.ValidateCreate(ctx, c)
 		assertCause(t, err,
-			"spec.tls.providerCfg.certManagerCfg.commonName: Invalid value: \""+tooLong+"\": commonName must be 64 characters or fewer to produce a valid X.509 CSR; got 65. Shorten commonName (the certificate provider derives a default when it is empty).")
+			"spec.tls.client.providerCfg.certManagerCfg.commonName: Invalid value: \""+tooLong+"\": commonName must be 64 characters or fewer to produce a valid X.509 CSR; got 65. Shorten commonName (the certificate provider derives a default when it is empty).")
 	})
 
 	t.Run("commonName exactly 64 chars is accepted", func(t *testing.T) {
 		c := newCluster(3, "3.6.1")
-		c.Spec.TLS = &TLSCertificate{
+		c.Spec.TLS = &EtcdClusterTLS{Client: &TLSSurface{
 			Provider:    "auto",
 			ProviderCfg: ProviderConfig{AutoCfg: &ProviderAutoConfig{CommonConfig: CommonConfig{CommonName: strings.Repeat("a", 64)}}},
-		}
+		}}
 		if _, err := v.ValidateCreate(ctx, c); err != nil {
 			t.Fatalf("expected a 64-char commonName to be accepted, got: %v", err)
 		}

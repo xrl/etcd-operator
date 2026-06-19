@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -436,8 +437,16 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 		Spec: ecv1alpha1.EtcdClusterSpec{
 			Size:    1,
 			Version: "3.5.17",
-			TLS: &ecv1alpha1.TLSCertificate{
-				Provider: "cert-manager",
+			TLS: &ecv1alpha1.EtcdClusterTLS{
+				Client: &ecv1alpha1.TLSSurface{
+					Provider: "cert-manager",
+					ProviderCfg: ecv1alpha1.ProviderConfig{
+						CertManagerCfg: &ecv1alpha1.ProviderCertManagerConfig{
+							IssuerKind: "Issuer",
+							IssuerName: "test-issuer",
+						},
+					},
+				},
 			},
 		},
 	}
@@ -445,7 +454,7 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 	ctx := t.Context()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
-	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}}
 	state, res, err := r.fetchAndValidateState(ctx, req)

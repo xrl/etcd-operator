@@ -221,7 +221,7 @@ func TestEnvtest_RejectsUndersizedStorage(t *testing.T) {
 func TestEnvtest_RejectsUnknownTLSProvider(t *testing.T) {
 	skipIfNoEnvtest(t)
 	c := mkCluster("bad-tls", 3, "3.6.1")
-	c.Spec.TLS = &operatorv1alpha1.TLSCertificate{Provider: "vault"}
+	c.Spec.TLS = &operatorv1alpha1.EtcdClusterTLS{Client: &operatorv1alpha1.TLSSurface{Provider: "vault"}}
 	err := whClient.Create(context.Background(), c)
 	if err == nil {
 		t.Fatal("expected unknown TLS provider to be rejected")
@@ -234,7 +234,7 @@ func TestEnvtest_RejectsUnknownTLSProvider(t *testing.T) {
 func TestEnvtest_AcceptsValidAndDefaultsTLSProvider(t *testing.T) {
 	skipIfNoEnvtest(t)
 	c := mkCluster("valid-defaults", 3, "3.6.1")
-	c.Spec.TLS = &operatorv1alpha1.TLSCertificate{} // empty provider -> defaulted to "auto"
+	c.Spec.TLS = &operatorv1alpha1.EtcdClusterTLS{Client: &operatorv1alpha1.TLSSurface{}} // empty provider -> defaulted to "auto"
 	if err := whClient.Create(context.Background(), c); err != nil {
 		t.Fatalf("expected valid cluster to be admitted, got: %v", err)
 	}
@@ -245,8 +245,8 @@ func TestEnvtest_AcceptsValidAndDefaultsTLSProvider(t *testing.T) {
 		client.ObjectKey{Name: c.Name, Namespace: c.Namespace}, &got); err != nil {
 		t.Fatalf("failed to read back cluster: %v", err)
 	}
-	if got.Spec.TLS == nil || got.Spec.TLS.Provider != "auto" {
-		t.Fatalf("expected defaulting webhook to set tls.provider=auto, got: %+v", got.Spec.TLS)
+	if got.Spec.TLS == nil || got.Spec.TLS.Client == nil || got.Spec.TLS.Client.Provider != "auto" {
+		t.Fatalf("expected defaulting webhook to set tls.client.provider=auto, got: %+v", got.Spec.TLS)
 	}
 }
 

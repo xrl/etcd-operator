@@ -86,7 +86,7 @@ func TestRecordClusterMetrics_HealthyQuorate(t *testing.T) {
 	reg := newRegistry(t)
 
 	c := newCluster("ns1", "etcd-a", 3)
-	c.Spec.TLS = &ecv1alpha1.TLSCertificate{Provider: "auto"}
+	c.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{Provider: "auto"}}
 	c.Status.MemberCount = 3
 	c.Status.ReadyReplicas = 3
 	c.Status.LeaderID = "abc123"
@@ -225,7 +225,7 @@ func TestRecordClusterMetrics_TLSReadyOnlyForTLSClusters(t *testing.T) {
 
 	// TLS cluster, Available -> tls_ready=1.
 	tls := newCluster("ns1", "etcd-tls", 3)
-	tls.Spec.TLS = &ecv1alpha1.TLSCertificate{Provider: "auto"}
+	tls.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{Provider: "auto"}}
 	tls.Status.MemberCount = 3
 	withAvailable(tls, true)
 	RecordClusterMetrics(tls)
@@ -242,7 +242,7 @@ func TestRecordClusterMetrics_TLSReadyClearedWhenTLSRemoved(t *testing.T) {
 	reg := newRegistry(t)
 
 	c := newCluster("ns1", "etcd-flip", 3)
-	c.Spec.TLS = &ecv1alpha1.TLSCertificate{Provider: "auto"}
+	c.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{Provider: "auto"}}
 	c.Status.MemberCount = 3
 	withAvailable(c, true)
 	RecordClusterMetrics(c)
@@ -303,7 +303,7 @@ func TestDeleteClusterMetrics(t *testing.T) {
 	reg := newRegistry(t)
 
 	c := newCluster("ns1", "etcd-f", 1)
-	c.Spec.TLS = &ecv1alpha1.TLSCertificate{Provider: "auto"}
+	c.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{Provider: "auto"}}
 	c.Status.MemberCount = 1
 	c.Status.LeaderID = "x"
 	c.Status.Members = []ecv1alpha1.MemberStatus{{ID: "1", IsHealthy: true}}

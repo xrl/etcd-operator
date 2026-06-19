@@ -146,10 +146,10 @@ func TestAdmissionWebhooks(t *testing.T) {
 		func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 			c := cfg.Client()
 			cluster := newWebhookTestCluster("wh-badtls", 3, webhookValidVersion)
-			cluster.Spec.TLS = &ecv1alpha1.TLSCertificate{Provider: "vault"}
+			cluster.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{Provider: "vault"}}
 			err := c.Resources().Create(ctx, cluster)
 			requireWebhookRejection(t, err,
-				"spec.tls.provider",
+				"spec.tls.client.provider",
 				// exact NotSupported rendering -- catches a garbled supported-values list
 				// that a loose Contains("auto") && Contains("cert-manager") would miss.
 				`supported values: "auto", "cert-manager"`,
@@ -180,7 +180,7 @@ func TestAdmissionWebhooks(t *testing.T) {
 			// size 1 (still odd/valid) minimizes the reconcile load this otherwise
 			// pure-admission test imposes on the kind node.
 			cluster := newWebhookTestCluster("wh-valid", 1, webhookValidVersion)
-			cluster.Spec.TLS = &ecv1alpha1.TLSCertificate{} // empty provider -> defaulted
+			cluster.Spec.TLS = &ecv1alpha1.EtcdClusterTLS{Client: &ecv1alpha1.TLSSurface{}} // empty provider -> defaulted
 			if err := c.Resources().Create(ctx, cluster); err != nil {
 				t.Fatalf("expected valid cluster to be admitted, got: %v", err)
 			}
@@ -190,8 +190,8 @@ func TestAdmissionWebhooks(t *testing.T) {
 			if err := c.Resources().Get(ctx, cluster.Name, namespace, &got); err != nil {
 				t.Fatalf("failed to read back cluster: %v", err)
 			}
-			if got.Spec.TLS == nil || got.Spec.TLS.Provider != "auto" {
-				t.Fatalf("expected defaulting webhook to set tls.provider=auto, got: %+v", got.Spec.TLS)
+			if got.Spec.TLS == nil || got.Spec.TLS.Client == nil || got.Spec.TLS.Client.Provider != "auto" {
+				t.Fatalf("expected defaulting webhook to set tls.client.provider=auto, got: %+v", got.Spec.TLS)
 			}
 			return ctx
 		})
