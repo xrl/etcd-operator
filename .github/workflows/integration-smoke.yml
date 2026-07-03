@@ -50,7 +50,12 @@ jobs:
       - name: Cleartext sample cluster reaches Available
         run: |
           kubectl create namespace "$TESTNS"
-          kubectl -n "$TESTNS" apply -f config/samples/operator_v1alpha1_etcdcluster.yaml
+          # deployment Ready != webhook endpoint dialable; retry the first apply until the webhook answers
+          for i in $(seq 1 12); do
+            kubectl -n "$TESTNS" apply -f config/samples/operator_v1alpha1_etcdcluster.yaml && break
+            [ "$i" = 12 ] && exit 1
+            sleep 5
+          done
           kubectl -n "$TESTNS" wait etcdcluster/etcdcluster-sample \
             --for=condition=Available --timeout=300s
 
