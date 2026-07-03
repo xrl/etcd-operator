@@ -1,0 +1,87 @@
+# integration-smoke.yml — kind smoke gate for downstream/integration.
+#
+# Exercises the operator against a real apiserver: build image, kind load,
+# cert-manager, make deploy, cleartext + cert-manager TLS sample clusters.
+# Final assertion checks Events are actually recorded on EtcdCluster objects —
+# the class of bug (events RBAC) envtest cannot catch.
+name: integration-smoke
+
+on:
+  push:
+    branches:
+      - downstream/integration
+  workflow_dispatch: {}
+
+env:
+  IMG: etcd-operator:smoke
+  TESTNS: smoke
+  CERT_MANAGER_VERSION: v1.16.0 # keep in step with test/utils/utils.go
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build operator image
+        run: docker build -t "$IMG" .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: smoke
+
+      - name: Load operator image into kind
+        run: kind load docker-image "$IMG" --name smoke
+
+      - name: Install cert-manager
+        run: |
+          kubectl apply -f "https://github.com/jetstack/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          for d in cert-manager cert-manager-cainjector cert-manager-webhook; do
+            kubectl -n cert-manager rollout status deploy/$d --timeout=180s
+          done
+
+      - name: Deploy operator
+        run: |
+          make deploy IMG="$IMG"
+          kubectl -n etcd-operator-system rollout status deploy/etcd-operator-controller-manager --timeout=300s
+
+      - name: Cleartext sample cluster reaches Available
+        run: |
+          kubectl create namespace "$TESTNS"
+          kubectl -n "$TESTNS" apply -f config/samples/operator_v1alpha1_etcdcluster.yaml
+          kubectl -n "$TESTNS" wait etcdcluster/etcdcluster-sample \
+            --for=condition=Available --timeout=300s
+
+      - name: TLS sample cluster reaches TLSReady
+        run: |
+          # Two-tier CA (see config/samples/sample_certmanager_etcdcluster.yaml):
+          # SelfSigned ClusterIssuer -> CA Certificate in cert-manager ns -> CA
+          # ClusterIssuer. The CA objects are cluster-scoped / pinned to the
+          # cert-manager namespace, so split them from the namespaced EtcdCluster.
+          # Retry: the cert-manager webhook can reject connections for a few
+          # seconds after its deployment reports ready.
+          for i in $(seq 1 10); do
+            yq 'select(.kind != "EtcdCluster")' config/samples/sample_certmanager_etcdcluster.yaml | kubectl apply -f - && break
+            [ "$i" = 10 ] && exit 1
+            sleep 6
+          done
+          kubectl wait clusterissuer/etcd-ca-issuer --for=condition=Ready --timeout=120s
+          yq 'select(.kind == "EtcdCluster")' config/samples/sample_certmanager_etcdcluster.yaml | kubectl -n "$TESTNS" apply -f -
+          kubectl -n "$TESTNS" wait etcdcluster/etcdcluster-sample-cert \
+            --for=condition=TLSReady --timeout=300s
+
+      - name: Assert Events recorded on EtcdCluster objects
+        run: |
+          # The reason this gate exists: envtest has no RBAC, so a missing
+          # events grant (events.k8s.io) only surfaces on a real apiserver.
+          kubectl get events -n "$TESTNS" \
+            --field-selector involvedObject.kind=EtcdCluster -o name | grep -q .
+
+      - name: Dump diagnostics
+        if: failure()
+        run: |
+          kubectl describe etcdclusters -n "$TESTNS" || true
+          kubectl get events -n "$TESTNS" --sort-by=.lastTimestamp || true
+          kubectl -n etcd-operator-system logs deploy/etcd-operator-controller-manager --all-containers --tail=-1 || true
