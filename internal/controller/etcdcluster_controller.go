@@ -237,6 +237,11 @@ func (r *EtcdClusterReconciler) fetchAndValidateState(ctx context.Context, req c
 			logger.Error(err, "Failed to create operator client certificate", "etcdCluster", ec.Name)
 			r.Recorder.Eventf(ec, nil, corev1.EventTypeWarning, reasonClientCertificateError,
 				"CreateClientCertificate", "failed to create operator client certificate: %v", err)
+			// This nil-error requeue returns a nil reconcileState, so the deferred
+			// updateStatus never runs; without a direct write here a cluster stuck
+			// on cert provisioning would loop forever with a completely empty
+			// .status (Events being the only signal).
+			r.markClientCertificateFailure(ctx, ec, err)
 			return nil, ctrl.Result{RequeueAfter: requeueDuration}, nil
 		}
 	} else {
@@ -765,6 +770,35 @@ func (r *EtcdClusterReconciler) recordTLSEvent(ec *ecv1alpha1.EtcdCluster, t tls
 	prior := meta.FindStatusCondition(ec.Status.Conditions, tlsReadyConditionType)
 	if prior == nil || prior.Status != metav1.ConditionTrue {
 		r.Recorder.Eventf(ec, nil, corev1.EventTypeNormal, reasonTLSReady, "TLSReady", "%s", t.message)
+	}
+}
+
+// markClientCertificateFailure persists Degraded and TLSReady conditions when
+// operator client-certificate provisioning fails in fetchAndValidateState. That
+// path requeues with a nil error and a nil reconcileState, bypassing both the
+// deferred updateStatus and the ReconcileFailed handling in updateConditions.
+// Best-effort: a status-write failure is only logged so the requeue contract of
+// the caller is unchanged.
+func (r *EtcdClusterReconciler) markClientCertificateFailure(ctx context.Context, ec *ecv1alpha1.EtcdCluster, certErr error) {
+	ec.Status.ObservedGeneration = ec.Generation
+	meta.SetStatusCondition(&ec.Status.Conditions, metav1.Condition{
+		Type:               "Degraded",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: ec.Generation,
+		Reason:             reasonClientCertificateError,
+		Message:            certErr.Error(),
+	})
+	// Same failure through the TLSReady vocabulary: the client surface is
+	// configured but the operator's own client certificate cannot be provisioned.
+	verdict := tlsReadiness{
+		configured: true,
+		ready:      false,
+		reason:     reasonClientCertificateError,
+		message:    fmt.Sprintf("client surface: failed to create operator client certificate: %v", certErr),
+	}
+	meta.SetStatusCondition(&ec.Status.Conditions, verdict.condition(ec.Generation))
+	if err := r.Status().Update(ctx, ec); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to update status after client certificate failure")
 	}
 }
 

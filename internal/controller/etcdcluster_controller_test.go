@@ -17,10 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
+	certv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -460,7 +462,10 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 
 	ctx := t.Context()
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(ec).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		Build()
 	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}}
@@ -472,6 +477,91 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 	assert.NoError(t, err, "the failure should be surfaced via requeue, not a returned error")
 	assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res, "expected a requeue with backoff")
 	assert.NotZero(t, res.RequeueAfter, "RequeueAfter must be non-zero")
+
+	// The nil-error requeue bypasses the deferred updateStatus; the direct
+	// status write must still surface the failure as conditions.
+	assertClientCertificateFailureConditions(t, ctx, fakeClient, req.NamespacedName)
+}
+
+// TestReconcileUnparseableValidityDurationSurfacesStatus reproduces the live gap:
+// a client surface whose certManagerCfg.validityDuration is unparseable is
+// admitted, then createClientCertificate fails on every reconcile via a nil-error
+// requeue that bypasses the deferred updateStatus. Full Reconcile must still
+// leave a non-empty .status: Degraded=True and TLSReady=False, both with reason
+// ClientCertificateError.
+func TestReconcileUnparseableValidityDurationSurfacesStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+	_ = certv1.AddToScheme(scheme)
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "etcd",
+			Namespace:  "default",
+			UID:        "1",
+			Generation: 1,
+		},
+		Spec: ecv1alpha1.EtcdClusterSpec{
+			Size:    1,
+			Version: "3.5.17",
+			TLS: &ecv1alpha1.EtcdClusterTLS{
+				Client: &ecv1alpha1.TLSSurface{
+					Provider: "cert-manager",
+					ProviderCfg: ecv1alpha1.ProviderConfig{
+						CertManagerCfg: &ecv1alpha1.ProviderCertManagerConfig{
+							CommonConfig: ecv1alpha1.CommonConfig{
+								ValidityDuration: "garbage",
+							},
+							IssuerKind: "Issuer",
+							IssuerName: "test-issuer",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := t.Context()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(ec).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		Build()
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}}
+	res, err := r.Reconcile(ctx, req)
+
+	assert.NoError(t, err, "the failure should be surfaced via requeue, not a returned error")
+	assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res, "expected a requeue with backoff")
+
+	assertClientCertificateFailureConditions(t, ctx, fakeClient, req.NamespacedName)
+}
+
+// assertClientCertificateFailureConditions asserts the persisted status of the
+// named cluster carries Degraded=True and TLSReady=False, both with reason
+// ClientCertificateError, and a matching observedGeneration.
+func assertClientCertificateFailureConditions(t *testing.T, ctx context.Context, c client.Client, key types.NamespacedName) {
+	t.Helper()
+
+	got := &ecv1alpha1.EtcdCluster{}
+	require.NoError(t, c.Get(ctx, key, got))
+	require.NotEmpty(t, got.Status.Conditions, ".status.conditions must not be left empty")
+	assert.Equal(t, got.Generation, got.Status.ObservedGeneration)
+
+	degraded := meta.FindStatusCondition(got.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded, "Degraded condition must be set")
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, reasonClientCertificateError, degraded.Reason)
+	assert.NotEmpty(t, degraded.Message)
+	assert.Equal(t, got.Generation, degraded.ObservedGeneration)
+
+	tlsReady := meta.FindStatusCondition(got.Status.Conditions, tlsReadyConditionType)
+	require.NotNil(t, tlsReady, "TLSReady condition must be set")
+	assert.Equal(t, metav1.ConditionFalse, tlsReady.Status)
+	assert.Equal(t, reasonClientCertificateError, tlsReady.Reason)
 }
 
 // TestBootstrapStatefulSet outlines tests for ensuring StatefulSet and Service
