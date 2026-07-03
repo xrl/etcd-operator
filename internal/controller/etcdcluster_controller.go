@@ -119,6 +119,7 @@ type reconcileState struct {
 // confirm it exists before arming the irreversible --force-new-cluster rebuild.
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;get;list;update
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups="cert-manager.io",resources=certificates,verbs=get;list;watch;create;patch;update;delete
 // +kubebuilder:rbac:groups="cert-manager.io",resources=clusterissuers,verbs=get;list;watch
