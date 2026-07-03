@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -327,6 +326,16 @@ func (cm *CertManagerProvider) createCertificate(ctx context.Context, secretKey 
 	// absence is legal here, so use comma-ok and do NOT error on a missing key.
 	issuerGroup, _ := cfg.ExtraConfig[IssuerGroupKey].(string)
 
+	var ipAddresses []string
+	for _, ip := range cfg.AltNames.IPs {
+		// Nil entries are rejected by the controller before reaching
+		// providers; skip them defensively here.
+		if ip == nil {
+			continue
+		}
+		ipAddresses = append(ipAddresses, ip.String())
+	}
+
 	certificateResource := &certmanagerv1.Certificate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretKey.Name,
@@ -339,7 +348,7 @@ func (cm *CertManagerProvider) createCertificate(ctx context.Context, secretKey 
 			},
 			SecretName:  secretKey.Name,
 			DNSNames:    cfg.AltNames.DNSNames,
-			IPAddresses: strings.Fields(strings.Trim(fmt.Sprint(cfg.AltNames.IPs), "[]")),
+			IPAddresses: ipAddresses,
 			IssuerRef: cmmeta.IssuerReference{
 				Name:  issuerName,
 				Kind:  issuerKind,

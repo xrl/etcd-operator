@@ -916,6 +916,17 @@ func parseValidityDuration(customizedDuration string, defaultDuration time.Durat
 	return duration, nil
 }
 
+// validateAltNameIPs rejects nil/empty entries so that invalid IP addresses
+// never reach certificate providers.
+func validateAltNameIPs(ips []net.IP) error {
+	for i, ip := range ips {
+		if len(ip) == 0 {
+			return fmt.Errorf("altNames.ipAddresses[%d] is not a valid IP address", i)
+		}
+	}
+	return nil
+}
+
 func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.TLSSurface) (*certInterface.Config, error) {
 	cmConfig := surface.ProviderCfg.CertManagerCfg
 	if cmConfig == nil {
@@ -928,11 +939,15 @@ func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.T
 		return nil, err
 	}
 
+	if err := validateAltNameIPs(cmConfig.AltNames.IPs); err != nil {
+		return nil, err
+	}
+
 	var getAltNames certInterface.AltNames
 	if cmConfig.AltNames.DNSNames != nil {
 		getAltNames = certInterface.AltNames{
 			DNSNames: cmConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(cmConfig.AltNames.DNSNames)),
+			IPs:      cmConfig.AltNames.IPs,
 		}
 	} else {
 		// Use wildcard DNS for the cluster's headless service to cover all pods
@@ -943,6 +958,7 @@ func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.T
 		}
 		getAltNames = certInterface.AltNames{
 			DNSNames: defaultDNSNames,
+			IPs:      cmConfig.AltNames.IPs,
 		}
 	}
 
@@ -978,11 +994,15 @@ func createAutoCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1
 		return nil, err
 	}
 
+	if err := validateAltNameIPs(autoConfig.AltNames.IPs); err != nil {
+		return nil, err
+	}
+
 	var altNames certInterface.AltNames
 	if autoConfig.AltNames.DNSNames != nil {
 		altNames = certInterface.AltNames{
 			DNSNames: autoConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(autoConfig.AltNames.DNSNames)),
+			IPs:      autoConfig.AltNames.IPs,
 		}
 	} else {
 		// Use wildcard DNS for the cluster's headless service to cover all pods
@@ -993,6 +1013,7 @@ func createAutoCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1
 		}
 		altNames = certInterface.AltNames{
 			DNSNames: defaultDNSNames,
+			IPs:      autoConfig.AltNames.IPs,
 		}
 	}
 
