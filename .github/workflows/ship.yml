@@ -1,0 +1,148 @@
+# ship.yml — tag-driven multi-arch image publish for the etcd-operator fork.
+#
+# LAWS compliance:
+#   LAWS-1  native per-arch build on hosted runners, stitched with a manifest (no QEMU)
+#   LAWS-2  COPY-not-compile: the Go binary is built on the runner, Dockerfile.ship only packages it
+#   LAWS-4  digest-pinned installer: make build-installer IMG=...@<digest>
+#   LAWS-15 real healthz/readyz kept (cmd/main.go AddHealthzCheck/AddReadyzCheck) — nothing faked here
+#
+# Publishes to BOTH registries, tag verbatim, NEVER :latest:
+#   ghcr.io/xrl/etcd-operator
+#   docker.io/xrlx/etcd-operator
+name: ship
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  GHCR_IMAGE: ghcr.io/xrl/etcd-operator
+  DOCKER_IMAGE: docker.io/xrlx/etcd-operator
+
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # LAWS-1 + LAWS-2: build each arch natively on the hosted runner (Go cross-compiles,
+      # no QEMU), so the Dockerfile only has to COPY a finished binary.
+      - name: Native per-arch build
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            echo "::group::go build $ARCH"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
+              go build -trimpath -ldflags '-s -w' -o "dist/manager-$ARCH" cmd/main.go
+            echo "::endgroup::"
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: xrlx
+          password: ${{ secrets.DOCKER_HUB_PAT }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # buildx is required so each per-arch image is stamped with the correct OCI
+      # platform metadata (config.architecture). A plain `docker build` on the amd64
+      # runner stamps architecture=amd64 regardless of which binary is COPY'd, which
+      # makes the stitched manifest list advertise two amd64 entries and no arm64.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build each per-arch image once from the prebuilt binary and push it to both
+      # registries under <reg>/...:<TAG>-<arch>. `--platform linux/$ARCH` forces the
+      # correct base-image variant + architecture metadata so the arm64 image is
+      # genuinely arm64 (not an amd64-stamped image holding an arm64 binary).
+      - name: Build and push per-arch images
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            echo "::group::package $ARCH"
+            docker buildx build -f Dockerfile.ship \
+              --platform "linux/${ARCH}" \
+              --build-arg TARGETARCH="$ARCH" \
+              -t "${GHCR_IMAGE}:${TAG}-${ARCH}" \
+              -t "${DOCKER_IMAGE}:${TAG}-${ARCH}" \
+              --push .
+            echo "::endgroup::"
+          done
+
+      # LAWS-1: stitch the per-arch images into one multi-arch manifest per registry.
+      # buildx imagetools reads each source image's real platform from its config, so
+      # the resulting list carries one linux/amd64 and one linux/arm64 entry.
+      - name: Stitch and push manifests
+        id: stitch
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for IMAGE in "${GHCR_IMAGE}" "${DOCKER_IMAGE}"; do
+            docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+              "${IMAGE}:${TAG}-amd64" \
+              "${IMAGE}:${TAG}-arm64"
+          done
+          # Resolve the pushed multi-arch digest (identical content => identical digest).
+          GHCR_DIGEST="$(docker buildx imagetools inspect "${GHCR_IMAGE}:${TAG}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          DOCKER_DIGEST="$(docker buildx imagetools inspect "${DOCKER_IMAGE}:${TAG}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "ghcr_digest=${GHCR_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "docker_digest=${DOCKER_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "GHCR  ${GHCR_IMAGE}@${GHCR_DIGEST}"
+          echo "DH    ${DOCKER_IMAGE}@${DOCKER_DIGEST}"
+
+      # cosign keyless sign each registry's manifest by digest. Gated so a registry
+      # that rejects OCI signatures cannot fail the publish (LAWS — sign is best-effort).
+      - name: Cosign sign (ghcr)
+        continue-on-error: true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: cosign sign --yes "${GHCR_IMAGE}@${{ steps.stitch.outputs.ghcr_digest }}"
+
+      - name: Cosign sign (docker hub)
+        continue-on-error: true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: cosign sign --yes "${DOCKER_IMAGE}@${{ steps.stitch.outputs.docker_digest }}"
+
+      # LAWS-4: generate the installer pinned to the immutable ghcr digest.
+      - name: Build digest-pinned installer
+        run: make build-installer IMG="${GHCR_IMAGE}@${{ steps.stitch.outputs.ghcr_digest }}"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-manifests-${{ github.ref_name }}
+          path: dist/install*.yaml
+          if-no-files-found: error
