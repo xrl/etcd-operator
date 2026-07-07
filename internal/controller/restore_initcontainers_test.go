@@ -58,7 +58,8 @@ func buildStatefulSetForCluster(t *testing.T, ec *ecv1alpha1.EtcdCluster) *appsv
 	ctx := context.Background()
 	scheme := restoreTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	require.NoError(t, createOrPatchStatefulSet(ctx, log.FromContext(ctx), ec, fakeClient, 1, scheme))
+	_, err := createOrPatchStatefulSet(ctx, log.FromContext(ctx), ec, fakeClient, 1, scheme)
+	require.NoError(t, err)
 	var sts appsv1.StatefulSet
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, &sts))
 	return &sts
@@ -157,7 +158,7 @@ func TestStatefulSet_RestoreCluster_MalformedAnnotationErrors(t *testing.T) {
 	ctx := context.Background()
 	scheme := restoreTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	err := createOrPatchStatefulSet(ctx, log.FromContext(ctx), ec, fakeClient, 1, scheme)
+	_, err := createOrPatchStatefulSet(ctx, log.FromContext(ctx), ec, fakeClient, 1, scheme)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "restore-source annotation")
 }

@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -256,20 +255,9 @@ func reconcileStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha
 		return nil, err
 	}
 
-	// Create Update StatefulSet
-	err = createOrPatchStatefulSet(ctx, logger, ec, c, replicas, scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	// Wait for statefulset to be ready
-	err = waitForStatefulSetReady(ctx, logger, c, ec.Name, ec.Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return latest Stateful set. (This is to ensure that we return the latest statefulset for next operation to act on)
-	return getStatefulSet(ctx, c, ec.Name, ec.Namespace)
+	// Create/update StatefulSet. The write response is returned (fresher than a
+	// post-write cache read, which can still hold the pre-write object).
+	return createOrPatchStatefulSet(ctx, logger, ec, c, replicas, scheme)
 }
 
 // tlsArgs captures the per-surface TLS decisions that drive defaultArgs. Each
@@ -404,7 +392,7 @@ func etcdPodLabels(ec *ecv1alpha1.EtcdCluster) map[string]string {
 	}
 }
 
-func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) error {
+func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ec.Name,
@@ -563,7 +551,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			})
 		// Create a new volume claim template
 		if ec.Spec.StorageSpec.VolumeSizeRequest.Cmp(resource.MustParse("1Mi")) < 0 {
-			return fmt.Errorf("VolumeSizeRequest must be at least 1Mi")
+			return nil, fmt.Errorf("VolumeSizeRequest must be at least 1Mi")
 		}
 
 		if ec.Spec.StorageSpec.VolumeSizeLimit.IsZero() {
@@ -597,7 +585,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			}
 		case corev1.ReadWriteMany:
 			if ec.Spec.StorageSpec.PVCName == "" {
-				return fmt.Errorf("PVCName must be set when AccessModes is ReadWriteMany")
+				return nil, fmt.Errorf("PVCName must be set when AccessModes is ReadWriteMany")
 			}
 			stsSpec.Template.Spec.Volumes = append(stsSpec.Template.Spec.Volumes, corev1.Volume{
 				Name: volumeName,
@@ -608,7 +596,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 				},
 			})
 		default:
-			return fmt.Errorf("AccessMode %s is not supported", ec.Spec.StorageSpec.AccessModes)
+			return nil, fmt.Errorf("AccessMode %s is not supported", ec.Spec.StorageSpec.AccessModes)
 		}
 	}
 
@@ -619,7 +607,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 	// left byte-identical (zero init-containers / no extra volumes), so the
 	// existing cluster reconcile/e2e is unaffected.
 	if src, ok, srcErr := restoreSourceFromCluster(ec); srcErr != nil {
-		return fmt.Errorf("invalid restore-source annotation on EtcdCluster %s/%s: %w",
+		return nil, fmt.Errorf("invalid restore-source annotation on EtcdCluster %s/%s: %w",
 			ec.Namespace, ec.Name, srcErr)
 	} else if ok {
 		applyRestoreInitContainers(&stsSpec.Template.Spec, ec, src)
@@ -642,46 +630,11 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	logger.Info("Stateful set created/updated", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
-	return nil
-}
-
-func waitForStatefulSetReady(ctx context.Context, logger logr.Logger, r client.Client, name, namespace string) error {
-	logger.Info("Now checking the readiness of statefulset", "name", name, "namespace", namespace)
-
-	backoff := wait.Backoff{
-		Duration: 3 * time.Second,
-		Factor:   2.0,
-		Steps:    5,
-	}
-
-	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
-		// Fetch the StatefulSet
-		sts, err := getStatefulSet(ctx, r, name, namespace)
-		if err != nil {
-			return false, err
-		}
-
-		// Check if the StatefulSet is ready
-		if sts.Status.ReadyReplicas == *sts.Spec.Replicas {
-			// StatefulSet is ready
-			logger.Info("StatefulSet is ready", "name", name, "namespace", namespace)
-			return true, nil
-		}
-
-		// Log the current status
-		logger.Info("StatefulSet is not ready", "ReadyReplicas", strconv.Itoa(int(sts.Status.ReadyReplicas)), "DesiredReplicas", strconv.Itoa(int(*sts.Spec.Replicas)))
-		return false, nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("StatefulSet %s/%s did not become ready: %w", namespace, name, err)
-	}
-
-	return nil
+	return sts, nil
 }
 
 func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c client.Client, ec *ecv1alpha1.EtcdCluster, scheme *runtime.Scheme) error {
@@ -883,6 +836,16 @@ func getStatefulSet(ctx context.Context, c client.Client, name, namespace string
 		return nil, err
 	}
 	return sts, nil
+}
+
+// statefulSetSpecObserved reports whether the StatefulSet controller has seen the latest spec write.
+func statefulSetSpecObserved(sts *appsv1.StatefulSet) bool {
+	return sts.Status.ObservedGeneration >= sts.Generation
+}
+
+// isStatefulSetSettled additionally requires every desired replica to be ready.
+func isStatefulSetSettled(sts *appsv1.StatefulSet) bool {
+	return statefulSetSpecObserved(sts) && sts.Spec.Replicas != nil && sts.Status.ReadyReplicas == *sts.Spec.Replicas
 }
 
 // clientEndpointsFromStatefulsets builds the operator's client endpoints. scheme
