@@ -381,6 +381,15 @@ func createArgs(name string, etcdOptions []string, tls tlsArgs) []string {
 	return defaultArgs
 }
 
+// etcdPodLabels labels the StatefulSet pods; the headless Service and
+// PodDisruptionBudget select on the same set.
+func etcdPodLabels(ec *ecv1alpha1.EtcdCluster) map[string]string {
+	return map[string]string{
+		"app":        ec.Name,
+		"controller": ec.Name,
+	}
+}
+
 func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) error {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -389,10 +398,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		},
 	}
 
-	labels := map[string]string{
-		"app":        ec.Name,
-		"controller": ec.Name,
-	}
+	labels := etcdPodLabels(ec)
 
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{
@@ -672,10 +678,7 @@ func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c 
 		if k8serrors.IsNotFound(err) {
 			logger.Info("Headless service does not exist. Creating headless service")
 
-			labels := map[string]string{
-				"app":        ec.Name,
-				"controller": ec.Name,
-			}
+			labels := etcdPodLabels(ec)
 			// Create the headless service
 			headlessSvc := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
