@@ -50,7 +50,10 @@ const (
 // EtcdClusterReconciler reconciles a EtcdCluster object
 type EtcdClusterReconciler struct {
 	client.Client
-	Scheme        *runtime.Scheme
+	Scheme *runtime.Scheme
+	// PodReader reads pods straight from the API server. Reading pods through
+	// the cached client would lazily start a cluster-wide pod informer.
+	PodReader     client.Reader
 	Recorder      events.EventRecorder
 	ImageRegistry string
 
@@ -119,8 +122,9 @@ type reconcileState struct {
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // Quorum-loss recovery reads the survivor pod (cached client => list+watch) to
-// confirm it exists before arming the irreversible --force-new-cluster rebuild.
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// confirm it exists before arming the irreversible --force-new-cluster rebuild;
+// quorum-gated upgrades delete one outdated pod at a time (OnDelete strategy).
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;get;list;update
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;patch;update;delete
@@ -178,6 +182,15 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	)
 	if pdbErr != nil {
 		log.FromContext(ctx).Error(pdbErr, "Failed to reconcile PodDisruptionBudget")
+	}
+
+	// A pod replaced during an upgrade may never come back healthy; without
+	// this the failed health check would keep template and pod convergence
+	// unreachable forever.
+	if healthErr != nil {
+		if res, handled := r.recoverDegradedUpgrade(ctx, state); handled {
+			return res, nil
+		}
 	}
 
 	// While the StatefulSet is still converging (e.g. image pull after bootstrap)
@@ -322,6 +335,12 @@ func (r *EtcdClusterReconciler) fetchAndValidateState(ctx context.Context, req c
 			return &reconcileState{cluster: ec, sts: sts, tls: tlsState}, ctrl.Result{}, nil
 		}
 		currentVersion := stsImage[idx+1:]
+		// Prefer the observed cluster version: the template tag may name an
+		// image that never ran (e.g. a nonexistent patch release), which would
+		// make every rollback look like a downgrade and wedge the cluster.
+		if ec.Status.CurrentVersion != "" {
+			currentVersion = ec.Status.CurrentVersion
+		}
 		targetVersion := ec.Spec.Version
 
 		// Only handle cases when there is a version change. Compare on the
@@ -560,8 +579,7 @@ func (r *EtcdClusterReconciler) reconcileClusterState(ctx context.Context, s *re
 	}
 
 	if targetReplica == int32(s.cluster.Spec.Size) {
-		logger.Info("EtcdCluster is already up-to-date")
-		return ctrl.Result{}, nil
+		return r.reconcileVersionUpgrade(ctx, s)
 	}
 
 	eps := clientEndpointsFromStatefulsets(s.sts, cScheme)
@@ -929,6 +947,9 @@ func isCertManagerCRDPresent(mgr ctrl.Manager) bool {
 // SetupWithManager sets up the controller with the Manager.
 func (r *EtcdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorder("etcdcluster-controller")
+	if r.PodReader == nil {
+		r.PodReader = mgr.GetAPIReader()
+	}
 	setupLog := ctrl.Log.WithName("setup")
 
 	builder := ctrl.NewControllerManagedBy(mgr).

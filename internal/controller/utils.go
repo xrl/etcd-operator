@@ -241,6 +241,9 @@ func etcdContainerResources() corev1.ResourceRequirements {
 	}
 }
 
+// reconcileStatefulSet renders and applies the ConfigMap, member certs and
+// StatefulSet without waiting for readiness; the reconcile-loop gates handle
+// convergence, so recovery paths can use it while pods are down.
 func reconcileStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
 
 	// prepare/update configmap for StatefulSet
@@ -529,6 +532,9 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 	stsSpec := appsv1.StatefulSetSpec{
 		Replicas:    &replicas,
 		ServiceName: ec.Name,
+		// OnDelete: pods are only replaced when the upgrade gate deletes them,
+		// never rolled automatically on template changes.
+		UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType},
 		Selector: &metav1.LabelSelector{
 			MatchLabels: labels,
 		},
