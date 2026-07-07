@@ -885,8 +885,8 @@ func TestCreateOrPatchStatefulSetWithoutSchedulingFields(t *testing.T) {
 	podSpec := sts.Spec.Template.Spec
 	assert.Nil(t, podSpec.TopologySpreadConstraints)
 	assert.Empty(t, podSpec.PriorityClassName)
-	assert.Empty(t, podSpec.Containers[0].Resources.Requests)
-	assert.Empty(t, podSpec.Containers[0].Resources.Limits)
+	// Without podTemplate resources the --etcd-cpu-request default applies.
+	assert.Equal(t, etcdContainerResources(), podSpec.Containers[0].Resources)
 }
 
 func TestCreatingArgs(t *testing.T) {
