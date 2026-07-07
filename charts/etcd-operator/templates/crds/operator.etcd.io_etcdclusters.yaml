@@ -53,6 +53,59 @@ spec:
                   If unset, it defaults to the value provided via the controller's
                   --image-registry flag, which itself defaults to "gcr.io/etcd-development/etcd".
                 type: string
+              metrics:
+                description: |-
+                  Metrics configures Prometheus observability for this cluster. When unset,
+                  the operator still exports its own per-cluster domain metrics on its
+                  /metrics endpoint, but does not create a PodMonitor for the etcd member
+                  pods. See MetricsSpec for the available knobs.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled toggles emission of the operator's per-cluster domain metrics
+                      (member counts, quorum, leader changes, reconcile timings, etc.) for this
+                      cluster. When nil it defaults to true: metrics are exported unless
+                      explicitly disabled. Disabling drops the cluster's series from the
+                      operator's /metrics endpoint.
+                    type: boolean
+                  podMonitor:
+                    description: |-
+                      PodMonitor, when set and enabled, instructs the operator to create and
+                      maintain a prometheus-operator PodMonitor selecting this cluster's etcd
+                      member pods so that Prometheus scrapes etcd's own /metrics endpoint.
+                      This requires the prometheus-operator PodMonitor CRD to be installed in
+                      the cluster; if it is absent the operator logs and skips PodMonitor
+                      reconciliation without failing the rest of the reconcile.
+                    properties:
+                      enabled:
+                        description: Enabled toggles creation of the PodMonitor. Defaults
+                          to false.
+                        type: boolean
+                      interval:
+                        description: |-
+                          Interval at which Prometheus scrapes the etcd member pods, e.g. "30s".
+                          When empty the prometheus-operator default is used.
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Labels are additional metadata labels to set on the generated
+                          PodMonitor. They are merged on top of the operator-managed labels
+                          (app.kubernetes.io/name, /managed-by, /instance): user-provided keys
+                          take precedence on conflict. This is typically used to satisfy a
+                          namespaced Prometheus's podMonitorSelector, e.g. setting
+                          "release: kvs-prometheus" so a release-scoped Prometheus discovers and
+                          scrapes this PodMonitor. When empty, only the operator-managed labels
+                          are applied (today's behavior).
+                        type: object
+                      port:
+                        description: |-
+                          Port is the name of the pod port exposing etcd's /metrics endpoint.
+                          Defaults to "client" when empty.
+                        type: string
+                    type: object
+                type: object
               podTemplate:
                 description: PodTemplate is the pod template to use for the etcd cluster.
                 properties:
@@ -1070,119 +1123,300 @@ spec:
                 - volumeSizeRequest
                 type: object
               tls:
-                description: TLS is the TLS certificate configuration to use for the
-                  etcd cluster and etcd operator.
+                description: |-
+                  TLS configures etcd's two independent TLS surfaces (peer and client/server).
+                  Each surface is optional and configured fully independently; a nil surface
+                  means that surface is served/dialed in cleartext. When TLS itself is nil, the
+                  entire cluster (peer + client + operator client) is cleartext, byte-identical
+                  to a TLS-free deployment.
+
+                  TLS is effectively create-time: it flows into the pod template and cert mounts.
+                  Toggling it on (or off) on a running cluster rolls the StatefulSet into a mixed
+                  http/https membership whose peers cannot connect, dropping quorum. The supported
+                  path is a NEW TLS cluster plus data migration, not an in-place flip.
                 properties:
-                  provider:
-                    type: string
-                  providerCfg:
+                  client:
+                    description: |-
+                      Client configures client->etcd (server) TLS AND, transitively, the operator's
+                      own etcd client identity (the operator authenticates to etcd as a client).
+                      When nil, client traffic is cleartext and the operator dials cleartext.
                     properties:
-                      autoCfg:
+                      clientCertAuth:
+                        default: true
+                        description: |-
+                          ClientCertAuth toggles mutual cert auth for THIS surface (etcd's
+                          --client-cert-auth for the client surface, --peer-client-cert-auth for the
+                          peer surface). Defaults to true (mTLS). Set false to serve server-only TLS
+                          where clients authenticate by other means (password/token). When true with
+                          the cert-manager provider a trusted CA (issuerName) is REQUIRED, enforced by
+                          the XValidation rule above.
+                        type: boolean
+                      provider:
+                        description: |-
+                          Provider selects the certificate provider for THIS surface.
+                          Defaults to "auto" when empty.
+                        enum:
+                        - auto
+                        - cert-manager
+                        type: string
+                      providerCfg:
+                        description: ProviderCfg is the provider-specific config for
+                          THIS surface.
                         properties:
-                          altNames:
-                            description: |-
-                              AltNames contains the domain names and IP addresses that will be added
-                              to the x509 certificate SubAltNames fields. The values will be passed
-                              directly to the x509.Certificate object.
+                          autoCfg:
                             properties:
-                              dnsNames:
+                              altNames:
                                 description: |-
-                                  DNSNames is the expected array of DNS subject alternative names.
-                                  if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                  AltNames contains the domain names and IP addresses that will be added
+                                  to the x509 certificate SubAltNames fields. The values will be passed
+                                  directly to the x509.Certificate object.
+                                properties:
+                                  dnsNames:
+                                    description: |-
+                                      DNSNames is the expected array of DNS subject alternative names.
+                                      if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                    items:
+                                      type: string
+                                    type: array
+                                  ipAddresses:
+                                    description: IPs is the expected array of IP address
+                                      subject alternative names.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              commonName:
+                                description: |-
+                                  CommonName is the expected common name X509 certificate subject attribute.
+                                  Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
+                                type: string
+                              organizations:
+                                description: Organization is the expected array of
+                                  Organization names to be used on the Certificate.
                                 items:
                                   type: string
                                 type: array
-                              ipAddresses:
-                                description: IPs is the expected array of IP address
-                                  subject alternative names.
-                                items:
-                                  type: string
-                                type: array
+                              validityDuration:
+                                description: |-
+                                  ValidityDuration is the expected duration until which the certificate will be valid,
+                                  expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
+                                  and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
+                                type: string
                             type: object
-                          caBundleSecret:
-                            description: |-
-                              CABundleSecret is the expected secret name with CABundle present. It's used
-                              by each etcd POD to verify TLS communications with its peers or clients. If it isn't
-                              provided, the CA included in the secret generated by certificate provider will be
-                              used instead if present; otherwise, there is no way to verify TLS communications.
-                            type: string
-                          commonName:
-                            description: |-
-                              CommonName is the expected common name X509 certificate subject attribute.
-                              Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
-                            type: string
-                          organizations:
-                            description: Organization is the expected array of Organization
-                              names to be used on the Certificate.
-                            items:
-                              type: string
-                            type: array
-                          validityDuration:
-                            description: |-
-                              ValidityDuration is the expected duration until which the certificate will be valid,
-                              expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
-                              and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
-                            type: string
-                        type: object
-                      certManagerCfg:
-                        properties:
-                          altNames:
-                            description: |-
-                              AltNames contains the domain names and IP addresses that will be added
-                              to the x509 certificate SubAltNames fields. The values will be passed
-                              directly to the x509.Certificate object.
+                          certManagerCfg:
                             properties:
-                              dnsNames:
+                              altNames:
                                 description: |-
-                                  DNSNames is the expected array of DNS subject alternative names.
-                                  if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                  AltNames contains the domain names and IP addresses that will be added
+                                  to the x509 certificate SubAltNames fields. The values will be passed
+                                  directly to the x509.Certificate object.
+                                properties:
+                                  dnsNames:
+                                    description: |-
+                                      DNSNames is the expected array of DNS subject alternative names.
+                                      if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                    items:
+                                      type: string
+                                    type: array
+                                  ipAddresses:
+                                    description: IPs is the expected array of IP address
+                                      subject alternative names.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              commonName:
+                                description: |-
+                                  CommonName is the expected common name X509 certificate subject attribute.
+                                  Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
+                                type: string
+                              issuerGroup:
+                                description: |-
+                                  IssuerGroup is the API group of the issuer referenced by IssuerKind/IssuerName.
+                                  Empty defaults to "cert-manager.io". Set this to target issuers served by an
+                                  external/intermediate issuer group (e.g. an out-of-tree CA controller).
+                                type: string
+                              issuerKind:
+                                description: IssuerKind is the expected kind of Issuer,
+                                  either "ClusterIssuer" or "Issuer".
+                                enum:
+                                - Issuer
+                                - ClusterIssuer
+                                type: string
+                              issuerName:
+                                description: IssuerName is the expected name of Issuer
+                                  required to issue a certificate
+                                type: string
+                              organizations:
+                                description: Organization is the expected array of
+                                  Organization names to be used on the Certificate.
                                 items:
                                   type: string
                                 type: array
-                              ipAddresses:
-                                description: IPs is the expected array of IP address
-                                  subject alternative names.
-                                items:
-                                  type: string
-                                type: array
+                              validityDuration:
+                                description: |-
+                                  ValidityDuration is the expected duration until which the certificate will be valid,
+                                  expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
+                                  and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
+                                type: string
+                            required:
+                            - issuerKind
+                            - issuerName
                             type: object
-                          caBundleSecret:
-                            description: |-
-                              CABundleSecret is the expected secret name with CABundle present. It's used
-                              by each etcd POD to verify TLS communications with its peers or clients. If it isn't
-                              provided, the CA included in the secret generated by certificate provider will be
-                              used instead if present; otherwise, there is no way to verify TLS communications.
-                            type: string
-                          commonName:
-                            description: |-
-                              CommonName is the expected common name X509 certificate subject attribute.
-                              Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
-                            type: string
-                          issuerKind:
-                            description: IssuerKind is the expected kind of Issuer,
-                              either "ClusterIssuer" or "Issuer"
-                            type: string
-                          issuerName:
-                            description: IssuerName is the expected name of Issuer
-                              required to issue a certificate
-                            type: string
-                          organizations:
-                            description: Organization is the expected array of Organization
-                              names to be used on the Certificate.
-                            items:
-                              type: string
-                            type: array
-                          validityDuration:
-                            description: |-
-                              ValidityDuration is the expected duration until which the certificate will be valid,
-                              expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
-                              and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
-                            type: string
-                        required:
-                        - issuerKind
-                        - issuerName
                         type: object
                     type: object
+                    x-kubernetes-validations:
+                    - message: provider 'cert-manager' requires providerCfg.certManagerCfg
+                      rule: self.provider != 'cert-manager' || has(self.providerCfg.certManagerCfg)
+                    - message: providerCfg.certManagerCfg may only be set when provider
+                        is 'cert-manager'
+                      rule: self.provider == 'cert-manager' || !has(self.providerCfg.certManagerCfg)
+                    - message: 'clientCertAuth requires a trusted CA: set providerCfg.certManagerCfg.issuerName'
+                      rule: '!self.clientCertAuth || self.provider != ''cert-manager''
+                        || (has(self.providerCfg.certManagerCfg) && size(self.providerCfg.certManagerCfg.issuerName)
+                        > 0)'
+                  peer:
+                    description: |-
+                      Peer configures etcd<->etcd (peer) TLS. When nil, peer traffic is cleartext.
+                      A configured peer surface REQUIRES a CA-capable issuer shared by all members
+                      so members can mutually verify; a self-signed *leaf* issuer cannot form a
+                      multi-member cluster. (CA-capability lives on the cert-manager Issuer object,
+                      not on this spec, so that check is enforced at reconcile time, not via CEL.)
+                    properties:
+                      clientCertAuth:
+                        default: true
+                        description: |-
+                          ClientCertAuth toggles mutual cert auth for THIS surface (etcd's
+                          --client-cert-auth for the client surface, --peer-client-cert-auth for the
+                          peer surface). Defaults to true (mTLS). Set false to serve server-only TLS
+                          where clients authenticate by other means (password/token). When true with
+                          the cert-manager provider a trusted CA (issuerName) is REQUIRED, enforced by
+                          the XValidation rule above.
+                        type: boolean
+                      provider:
+                        description: |-
+                          Provider selects the certificate provider for THIS surface.
+                          Defaults to "auto" when empty.
+                        enum:
+                        - auto
+                        - cert-manager
+                        type: string
+                      providerCfg:
+                        description: ProviderCfg is the provider-specific config for
+                          THIS surface.
+                        properties:
+                          autoCfg:
+                            properties:
+                              altNames:
+                                description: |-
+                                  AltNames contains the domain names and IP addresses that will be added
+                                  to the x509 certificate SubAltNames fields. The values will be passed
+                                  directly to the x509.Certificate object.
+                                properties:
+                                  dnsNames:
+                                    description: |-
+                                      DNSNames is the expected array of DNS subject alternative names.
+                                      if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                    items:
+                                      type: string
+                                    type: array
+                                  ipAddresses:
+                                    description: IPs is the expected array of IP address
+                                      subject alternative names.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              commonName:
+                                description: |-
+                                  CommonName is the expected common name X509 certificate subject attribute.
+                                  Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
+                                type: string
+                              organizations:
+                                description: Organization is the expected array of
+                                  Organization names to be used on the Certificate.
+                                items:
+                                  type: string
+                                type: array
+                              validityDuration:
+                                description: |-
+                                  ValidityDuration is the expected duration until which the certificate will be valid,
+                                  expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
+                                  and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
+                                type: string
+                            type: object
+                          certManagerCfg:
+                            properties:
+                              altNames:
+                                description: |-
+                                  AltNames contains the domain names and IP addresses that will be added
+                                  to the x509 certificate SubAltNames fields. The values will be passed
+                                  directly to the x509.Certificate object.
+                                properties:
+                                  dnsNames:
+                                    description: |-
+                                      DNSNames is the expected array of DNS subject alternative names.
+                                      if empty defaults to $(POD_NAME).$(ETCD_CLUSTER_NAME).$(POD_NAMESPACE).svc.cluster.local
+                                    items:
+                                      type: string
+                                    type: array
+                                  ipAddresses:
+                                    description: IPs is the expected array of IP address
+                                      subject alternative names.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              commonName:
+                                description: |-
+                                  CommonName is the expected common name X509 certificate subject attribute.
+                                  Should have a length of 64 characters or fewer to avoid generating invalid CSRs.
+                                type: string
+                              issuerGroup:
+                                description: |-
+                                  IssuerGroup is the API group of the issuer referenced by IssuerKind/IssuerName.
+                                  Empty defaults to "cert-manager.io". Set this to target issuers served by an
+                                  external/intermediate issuer group (e.g. an out-of-tree CA controller).
+                                type: string
+                              issuerKind:
+                                description: IssuerKind is the expected kind of Issuer,
+                                  either "ClusterIssuer" or "Issuer".
+                                enum:
+                                - Issuer
+                                - ClusterIssuer
+                                type: string
+                              issuerName:
+                                description: IssuerName is the expected name of Issuer
+                                  required to issue a certificate
+                                type: string
+                              organizations:
+                                description: Organization is the expected array of
+                                  Organization names to be used on the Certificate.
+                                items:
+                                  type: string
+                                type: array
+                              validityDuration:
+                                description: |-
+                                  ValidityDuration is the expected duration until which the certificate will be valid,
+                                  expects in human-readable duration: 100d12h, if empty defaults to 90d for cert-manager
+                                  and 365d for auto as per: https://github.com/etcd-io/etcd/blob/b87bc1c3a275d7d4904f4d201b963a2de2264f0d/client/pkg/transport/listener.go#L275
+                                type: string
+                            required:
+                            - issuerKind
+                            - issuerName
+                            type: object
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: provider 'cert-manager' requires providerCfg.certManagerCfg
+                      rule: self.provider != 'cert-manager' || has(self.providerCfg.certManagerCfg)
+                    - message: providerCfg.certManagerCfg may only be set when provider
+                        is 'cert-manager'
+                      rule: self.provider == 'cert-manager' || !has(self.providerCfg.certManagerCfg)
+                    - message: 'clientCertAuth requires a trusted CA: set providerCfg.certManagerCfg.issuerName'
+                      rule: '!self.clientCertAuth || self.provider != ''cert-manager''
+                        || (has(self.providerCfg.certManagerCfg) && size(self.providerCfg.certManagerCfg.issuerName)
+                        > 0)'
                 type: object
               version:
                 description: Version is the expected version of the etcd container
@@ -1333,6 +1567,97 @@ spec:
                   This reflects the .status.readyReplicas of the underlying StatefulSet.
                 format: int32
                 type: integer
+              recovery:
+                description: |-
+                  Recovery captures the state of an in-progress (or last attempted) automatic
+                  disaster recovery from quorum loss. It is managed entirely by the operator's
+                  quorum-loss recovery state machine and is nil when no recovery has ever been
+                  attempted.
+                properties:
+                  attempts:
+                    description: |-
+                      Attempts is the number of times the operator has committed to a destructive
+                      rebuild for this cluster (i.e. entered the Rebuilding phase from Detecting).
+                      It is a monotonically increasing counter that survives across recoveries and
+                      is never reset, giving operators a durable signal of how often this cluster
+                      has needed disaster recovery — repeated recoveries usually point at an
+                      underlying infrastructure problem rather than a one-off event.
+                    format: int32
+                    type: integer
+                  dataLoss:
+                    description: |-
+                      DataLoss records the data-loss accounting for the most recent rebuild.
+
+                      Quorum-loss recovery via --force-new-cluster is NOT a lossless operation:
+                      the rebuilt cluster retains only the writes that were committed to the
+                      surviving member's local data directory. Any write that a now-destroyed
+                      majority had committed but had not yet replicated to the survivor is GONE.
+                      This field surfaces that fact explicitly (alongside a Warning Event, the
+                      DataLossPossible condition, and structured logs) so the loss is auditable
+                      and never silent. It is nil until a rebuild from a survivor completes.
+                    properties:
+                      message:
+                        description: |-
+                          Message is a human-readable, operator-facing summary of the data-loss
+                          situation, e.g. "recovered with possible data loss; rebuilt from member
+                          <id> at revision <r>".
+                        type: string
+                      raftIndex:
+                        description: |-
+                          RaftIndex is the survivor's raft committed index at rebuild time, recorded
+                          for forensic correlation with member logs.
+                        format: int64
+                        type: integer
+                      recoveredTime:
+                        description: |-
+                          RecoveredTime is when the rebuilt single-member cluster was confirmed
+                          healthy and this accounting was captured.
+                        format: date-time
+                        type: string
+                      survivorMemberID:
+                        description: |-
+                          SurvivorMemberID is the hex-encoded etcd member ID of the survivor whose
+                          data directory was used to rebuild the cluster.
+                        type: string
+                      survivorRevision:
+                        description: |-
+                          SurvivorRevision is the key-value store revision present on the survivor at
+                          the moment the single-member cluster came back healthy. It is the highest
+                          revision guaranteed to be retained; any revision the lost majority committed
+                          above this value did not survive the rebuild.
+                        format: int64
+                        type: integer
+                    type: object
+                  detectedTime:
+                    description: |-
+                      DetectedTime is the first time a sustained-quorum-loss candidate was
+                      observed. It anchors the grace window used to distinguish true quorum loss
+                      from transient single-member failures.
+                    format: date-time
+                    type: string
+                  lastTransitionTime:
+                    description: LastTransitionTime is the time the recovery phase
+                      last changed.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable description of the current
+                      recovery step.
+                    type: string
+                  phase:
+                    description: Phase is the current stage of the recovery state
+                      machine.
+                    type: string
+                  survivorOrdinal:
+                    description: |-
+                      SurvivorOrdinal is the StatefulSet pod ordinal whose data directory was
+                      chosen as the surviving source of truth for the rebuild. It is always 0
+                      today (the operator keeps ordinal-0's PVC) but is recorded explicitly so
+                      the choice is auditable and future survivor-selection policies remain
+                      backward compatible.
+                    format: int32
+                    type: integer
+                type: object
             type: object
         type: object
     served: true
