@@ -199,7 +199,7 @@ func TestTLSIndependenceArgsMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ec := clusterWithTLS(name, tt.tls)
-			got := createArgs(name, nil, tlsArgsFor(ec))
+			got := createArgs(ec)
 			assert.Equal(t, tt.expected, got)
 		})
 	}

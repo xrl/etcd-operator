@@ -331,6 +331,11 @@ func (in *EtcdClusterSpec) DeepCopyInto(out *EtcdClusterSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.QuotaBackendBytes != nil {
+		in, out := &in.QuotaBackendBytes, &out.QuotaBackendBytes
+		x := (*in).DeepCopy()
+		*out = &x
+	}
 	if in.PodTemplate != nil {
 		in, out := &in.PodTemplate, &out.PodTemplate
 		*out = new(PodTemplate)

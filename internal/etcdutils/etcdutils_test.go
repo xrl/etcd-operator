@@ -433,3 +433,20 @@ func TestMoveLeader(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestAlarmList(t *testing.T) {
+	e := setupEtcdServer(t)
+	defer e.Close()
+
+	t.Run("NoActiveAlarms", func(t *testing.T) {
+		alarms, err := AlarmList([]string{"http://localhost:2379"}, nil)
+		assert.NoError(t, err)
+		assert.Empty(t, alarms)
+	})
+
+	t.Run("ReturnsErrorForInvalidEndpoint", func(t *testing.T) {
+		alarms, err := AlarmList([]string{"http://invalid:2379"}, nil)
+		assert.Error(t, err)
+		assert.Nil(t, alarms)
+	})
+}
