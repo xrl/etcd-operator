@@ -40,6 +40,20 @@ rules:
   - patch
   - update
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -79,9 +93,9 @@ rules:
   - create
   - patch
 - apiGroups:
-  - operator.etcd.io
+  - monitoring.coreos.com
   resources:
-  - etcdclusters
+  - podmonitors
   verbs:
   - create
   - delete
@@ -93,13 +107,31 @@ rules:
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups
+  - etcdclusters
+  - etcdrestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdrestores/finalizers
   verbs:
   - update
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups/status
   - etcdclusters/status
+  - etcdrestores/status
   verbs:
   - get
   - patch
@@ -154,6 +186,20 @@ rules:
   - patch
   - update
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -187,9 +233,9 @@ rules:
   - list
   - watch
 - apiGroups:
-  - operator.etcd.io
+  - monitoring.coreos.com
   resources:
-  - etcdclusters
+  - podmonitors
   verbs:
   - create
   - delete
@@ -201,13 +247,31 @@ rules:
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups
+  - etcdclusters
+  - etcdrestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdrestores/finalizers
   verbs:
   - update
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups/status
   - etcdclusters/status
+  - etcdrestores/status
   verbs:
   - get
   - patch
