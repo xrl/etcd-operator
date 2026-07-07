@@ -16,9 +16,8 @@
 #     issuerKind=ClusterIssuer (webhook A.3/D3).
 #   - OPERATOR_IMAGE : the restore init-container image. kustomize images: does
 #     NOT rewrite env values, so it must be pinned by digest here too (D8/H6).
-#     <DP-1 ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST> = the Docker Hub pull-through
-#     Artifactory host (precedent: kvs-docker-prod.docker.artifactory.viasat.com)
-#     — UNCONFIRMED, must be set before vendoring.
+#     docker.io directly — no Artifactory pull-through; NDP GKE clusters pull
+#     docker.io today (bitnamilegacy/etcd precedent in kv-argo-values).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,7 +40,6 @@ spec:
         - name: RESTRICT_CLUSTER_ISSUER
           value: "true"
         - name: OPERATOR_IMAGE
-          # DP-1: replace <ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST> with the
-          # confirmed Docker Hub pull-through host. Digest is the published
-          # v0.1.0-pre.1 operator image (identical on ghcr.io + docker.io, D12).
-          value: "<DP-1 ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST>/xrlx/etcd-operator@sha256:7e64f28cb9f2884e4bb225314292f9d20743213f3845a069a979970645fd8728"
+          # Digest is the published v0.1.0-pre.3 index digest (identical on
+          # ghcr.io + docker.io; supersedes pre.1, D12).
+          value: "docker.io/xrlx/etcd-operator@sha256:507823dbf4e813ed258c2f33392283aeb3ddf443c46bf663f0c2cb2ce04395e8"

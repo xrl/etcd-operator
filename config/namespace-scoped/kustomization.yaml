@@ -35,11 +35,11 @@ images:
   # `controller` name to `etcd-operator:v0.1` at the base, so this overlay
   # transform must match `etcd-operator` (the post-base name), not `controller`.
   - name: etcd-operator
-    # DP-1: <ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST> = confirmed Docker Hub
-    # pull-through Artifactory host (precedent kvs-docker-prod.docker.artifactory.viasat.com).
-    # Digest is the published v0.1.0-pre.1 operator image (D12).
-    newName: <DP-1 ARTIFACTORY_DOCKERHUB_PULLTHROUGH_HOST>/xrlx/etcd-operator
-    digest: sha256:7e64f28cb9f2884e4bb225314292f9d20743213f3845a069a979970645fd8728
+    # docker.io directly — no Artifactory pull-through; NDP GKE clusters pull
+    # docker.io today (bitnamilegacy/etcd precedent in kv-argo-values).
+    # Digest is the published v0.1.0-pre.3 index digest (D12; supersedes pre.1).
+    newName: docker.io/xrlx/etcd-operator
+    digest: sha256:507823dbf4e813ed258c2f33392283aeb3ddf443c46bf663f0c2cb2ce04395e8
 
 # Resolve the serving Certificate dnsNames (SERVICE_NAME.SERVICE_NAMESPACE.svc)
 # from the webhook Service name/namespace — same replacement config/default uses.
