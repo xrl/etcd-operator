@@ -66,6 +66,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  # events.k8s.io: the operator's events/v1 recorder writes here, NOT core/v1
+  # events (upstream fix #391 — without this rule every Event is rejected).
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - cert-manager.io
   resources:
   - certificates
