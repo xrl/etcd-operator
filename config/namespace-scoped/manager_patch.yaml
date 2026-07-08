@@ -9,6 +9,9 @@
 #     (metrics-auth-role) is needed; the port is NetworkPolicy-gated (A.4/D9).
 #   - --leader-elect : leader election Lease is namespaced (lands in kv).
 #   - --health-probe-bind-address : unchanged.
+#   - --mirror-agent-image : image for EtcdMirror agent Deployments (this same
+#     operator image; binary at /mirror-agent). kustomize images: does NOT
+#     rewrite args values, so it is digest-pinned here like OPERATOR_IMAGE.
 #
 # env:
 #   - WATCH_NAMESPACE=kv : same effect as the flag, kept for belt-and-suspenders.
@@ -34,6 +37,7 @@ spec:
         - --health-probe-bind-address=:8081
         - --metrics-secure=false
         - --metrics-bind-address=:8080
+        - --mirror-agent-image=docker.io/xrlx/etcd-operator@sha256:507823dbf4e813ed258c2f33392283aeb3ddf443c46bf663f0c2cb2ce04395e8
         env:
         - name: WATCH_NAMESPACE
           value: "kv"

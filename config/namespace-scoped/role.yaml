@@ -57,6 +57,7 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -113,6 +114,7 @@ rules:
   resources:
   - etcdbackups
   - etcdclusters
+  - etcdmirrors
   - etcdrestores
   verbs:
   - create
@@ -127,6 +129,7 @@ rules:
   resources:
   - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdmirrors/finalizers
   - etcdrestores/finalizers
   verbs:
   - update
@@ -135,6 +138,7 @@ rules:
   resources:
   - etcdbackups/status
   - etcdclusters/status
+  - etcdmirrors/status
   - etcdrestores/status
   verbs:
   - get
