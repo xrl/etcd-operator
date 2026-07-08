@@ -177,8 +177,12 @@ func (r *EtcdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// returns the member list for unhealthy clusters, which is exactly when
 	// disruption protection matters most. A PDB write failure is logged but
 	// never blocks health handling, quorum recovery, or cluster reconciliation.
+	var stsReplicas int32
+	if state.sts != nil && state.sts.Spec.Replicas != nil {
+		stsReplicas = *state.sts.Spec.Replicas
+	}
 	pdbErr := reconcilePodDisruptionBudget(
-		ctx, log.FromContext(ctx), r.Client, state.cluster, state.memberListResp, r.Scheme,
+		ctx, log.FromContext(ctx), r.Client, state.cluster, state.memberListResp, stsReplicas, r.Scheme,
 	)
 	if pdbErr != nil {
 		log.FromContext(ctx).Error(pdbErr, "Failed to reconcile PodDisruptionBudget")
