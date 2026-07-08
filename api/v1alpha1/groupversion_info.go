@@ -44,6 +44,8 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&EtcdBackupList{},
 		&EtcdRestore{},
 		&EtcdRestoreList{},
+		&EtcdMirror{},
+		&EtcdMirrorList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
