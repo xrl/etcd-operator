@@ -586,7 +586,7 @@ func stsHasForceNewCluster(sts *appsv1.StatefulSet) bool {
 	if sts == nil || sts.Annotations == nil {
 		return false
 	}
-	return sts.Annotations[recoveryForceNewClusterAnnotation] == "true"
+	return sts.Annotations[recoveryForceNewClusterAnnotation] == annotationValueTrue
 }
 
 // patchStatefulSetForForceNewCluster toggles single-member rebuild mode on the
@@ -612,7 +612,7 @@ func (r *EtcdClusterReconciler) patchStatefulSetForForceNewCluster(
 
 	if enable {
 		sts.Spec.Replicas = &one
-		sts.Annotations[recoveryForceNewClusterAnnotation] = "true"
+		sts.Annotations[recoveryForceNewClusterAnnotation] = annotationValueTrue
 		if !containsArg(container.Args, forceNewClusterArg) {
 			container.Args = append(container.Args, forceNewClusterArg)
 		}

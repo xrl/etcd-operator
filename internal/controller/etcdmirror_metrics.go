@@ -54,7 +54,7 @@ var (
 	// deliberately mirrors the metav1.Condition field name — NOT
 	// kube-state-metrics, whose analogous metrics call this label
 	// `condition`.
-	conditionStatusValues = []string{"true", "false", "unknown"}
+	conditionStatusValues = []string{annotationValueTrue, "false", "unknown"}
 
 	etcdMirrorPhaseGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "etcd_mirror_phase",

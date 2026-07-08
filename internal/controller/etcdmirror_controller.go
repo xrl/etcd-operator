@@ -54,6 +54,9 @@ const (
 	// "true" to let deletion proceed without reaching the target (the
 	// reserved key is orphaned and must be removed by hand).
 	skipCheckpointCleanupAnnotation = "operator.etcd.io/skip-checkpoint-cleanup"
+	// annotationValueTrue is the literal opt-in value shared by boolean-ish
+	// annotations in this package (goconst).
+	annotationValueTrue = "true"
 
 	// certExpiryLeadWindow: a referenced certificate expiring within this
 	// window draws a Warning event. cert-manager renews ~30d out, so <14d
@@ -603,7 +606,7 @@ func (r *EtcdMirrorReconciler) finalize(ctx context.Context, em *ecv1alpha1.Etcd
 		return ctrl.Result{}, nil
 	}
 
-	if em.Annotations[skipCheckpointCleanupAnnotation] == "true" {
+	if em.Annotations[skipCheckpointCleanupAnnotation] == annotationValueTrue {
 		r.Recorder.Eventf(em, nil, corev1.EventTypeNormal, "CheckpointCleanupSkipped", eventActionFinalize,
 			"checkpoint cleanup skipped by the %s annotation; reserved key %q remains in the target etcd",
 			skipCheckpointCleanupAnnotation, checkpointKeyForMirror(em))
