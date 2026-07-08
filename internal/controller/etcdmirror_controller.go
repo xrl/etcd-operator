@@ -139,12 +139,23 @@ func (r *EtcdMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	em := &ecv1alpha1.EtcdMirror{}
 	if err := r.Get(ctx, req.NamespacedName, em); err != nil {
 		if apierrors.IsNotFound(err) {
+			// Covers deletions observed after finalizer removal and
+			// controller-restart races: no stale series for a gone CR.
+			deleteEtcdMirrorMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
 	if !em.DeletionTimestamp.IsZero() {
+		// Deletion is irreversible, so drop the series now: finalization can
+		// retry checkpoint cleanup for an unbounded window (unreachable
+		// target), during which frozen pre-delete gauges would either keep
+		// paging for an intentionally deleted mirror or keep reporting
+		// Available=true for an agent already gone. Idempotent across
+		// finalize retries; the NotFound and removeFinalizer deletes remain
+		// as backstops.
+		deleteEtcdMirrorMetrics(em.Namespace, em.Name)
 		return r.finalize(ctx, em)
 	}
 
@@ -166,6 +177,9 @@ func (r *EtcdMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 	}
+	// Unconditionally: every reconcile outcome keeps the gauges honest,
+	// including failed /statusz polls (which set Available=Unknown above).
+	updateEtcdMirrorMetrics(em)
 	return res, err
 }
 
@@ -651,6 +665,7 @@ func (r *EtcdMirrorReconciler) removeFinalizer(ctx context.Context, em *ecv1alph
 	if err := r.Update(ctx, em); err != nil {
 		return ctrl.Result{}, err
 	}
+	deleteEtcdMirrorMetrics(em.Namespace, em.Name)
 	r.mu.Lock()
 	delete(r.lagSince, em.UID)
 	delete(r.counterBases, em.UID)

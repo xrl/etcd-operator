@@ -1,3 +1,4 @@
 resources:
 - monitor.yaml
 - alerts.yaml
+- etcdmirror_rules.yaml
