@@ -1,9 +1,11 @@
 # Dockerfile.ship — COPY-not-compile (LAWS-2).
-# The binary is cross-compiled natively on the hosted runner (LAWS-1) and only
+# The binaries are cross-compiled natively on the hosted runner (LAWS-1) and only
 # *packaged* here. There is no `go build` in this Dockerfile by design.
 # Base + digest + USER are kept identical to the repo's existing Dockerfile.
 FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 ARG TARGETARCH
 COPY dist/manager-${TARGETARCH} /manager
+# EtcdMirror agent Deployments run this same image with command ["/mirror-agent"].
+COPY dist/mirror-agent-${TARGETARCH} /mirror-agent
 USER 65532:65532
 ENTRYPOINT ["/manager"]
