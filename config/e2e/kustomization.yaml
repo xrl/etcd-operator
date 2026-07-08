@@ -10,3 +10,9 @@ patches:
     target:
       kind: Deployment
       name: controller-manager
+  # Keep after patch-metrics: that patch REPLACES the manager args list, so the
+  # appended --mirror-agent-image below would be lost if ordered first.
+  - path: patch-manager-flags.yaml
+    target:
+      kind: Deployment
+      name: controller-manager
