@@ -20,6 +20,10 @@ controller:
   # Defaults to the manager image ref. kustomize `images:` cannot rewrite env
   # values; here it follows the image automatically.
   operatorImage: ""
+  # --mirror-agent-image: image for EtcdMirror agent Deployments (the operator
+  # image itself; the binary ships at /mirror-agent). Defaults to the manager
+  # image ref.
+  mirrorAgentImage: ""
   leaderElection: true
   # Scope the operator to one namespace: renders a namespaced Role/RoleBinding in
   # that namespace instead of ClusterRole/ClusterRoleBinding and passes

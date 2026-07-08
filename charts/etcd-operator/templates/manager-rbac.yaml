@@ -57,6 +57,7 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -110,6 +111,7 @@ rules:
   resources:
   - etcdbackups
   - etcdclusters
+  - etcdmirrors
   - etcdrestores
   verbs:
   - create
@@ -124,6 +126,7 @@ rules:
   resources:
   - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdmirrors/finalizers
   - etcdrestores/finalizers
   verbs:
   - update
@@ -132,6 +135,7 @@ rules:
   resources:
   - etcdbackups/status
   - etcdclusters/status
+  - etcdmirrors/status
   - etcdrestores/status
   verbs:
   - get
@@ -216,6 +220,7 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -247,6 +252,13 @@ rules:
   - list
   - watch
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - monitoring.coreos.com
   resources:
   - podmonitors
@@ -263,6 +275,7 @@ rules:
   resources:
   - etcdbackups
   - etcdclusters
+  - etcdmirrors
   - etcdrestores
   verbs:
   - create
@@ -277,6 +290,7 @@ rules:
   resources:
   - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdmirrors/finalizers
   - etcdrestores/finalizers
   verbs:
   - update
@@ -285,6 +299,7 @@ rules:
   resources:
   - etcdbackups/status
   - etcdclusters/status
+  - etcdmirrors/status
   - etcdrestores/status
   verbs:
   - get

@@ -43,6 +43,7 @@ spec:
             {{- with .Values.controller.watchNamespace }}
             - --watch-namespace={{ . }}
             {{- end }}
+            - --mirror-agent-image={{ .Values.controller.mirrorAgentImage | default (include "etcd-operator.image" .) }}
           env:
             - name: OPERATOR_IMAGE
               value: {{ .Values.controller.operatorImage | default (include "etcd-operator.image" .) }}

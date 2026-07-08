@@ -23,6 +23,7 @@ helm install etcd-operator ./charts/etcd-operator \
 | `controller.image.pullPolicy` | `IfNotPresent` | |
 | `controller.imagePullSecrets` | `[]` | |
 | `controller.operatorImage` | `""` | `OPERATOR_IMAGE` env (image for operator-run utility containers). Defaults to the manager image ref, digest pin included. |
+| `controller.mirrorAgentImage` | `""` | `--mirror-agent-image` (image for EtcdMirror agent Deployments; binary at `/mirror-agent`). Defaults to the manager image ref. |
 | `controller.leaderElection` | `true` | `--leader-elect`. |
 | `controller.watchNamespace` | `""` | Scope the operator to one namespace: namespaced Role/RoleBinding there instead of ClusterRole/ClusterRoleBinding, plus `--watch-namespace` / `WATCH_NAMESPACE`. |
 | `controller.restrictClusterIssuer` | `false` | `RESTRICT_CLUSTER_ISSUER=true`: webhook rejects `issuerKind: ClusterIssuer`. |
