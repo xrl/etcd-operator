@@ -108,12 +108,13 @@ func (r *EtcdClusterReconciler) reconcilePodMonitor(ctx context.Context, ec *ecv
 			labels[k] = v
 		}
 		desired.SetLabels(labels)
+		matchLabels := map[string]any{}
+		for k, v := range etcdPodLabels(ec) {
+			matchLabels[k] = v
+		}
 		spec := map[string]any{
 			"selector": map[string]any{
-				"matchLabels": map[string]any{
-					"app":        ec.Name,
-					"controller": ec.Name,
-				},
+				"matchLabels": matchLabels,
 			},
 			"podMetricsEndpoints": []any{endpoint},
 		}

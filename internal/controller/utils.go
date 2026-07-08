@@ -386,8 +386,8 @@ func createArgs(ec *ecv1alpha1.EtcdCluster) []string {
 	return defaultArgs
 }
 
-// etcdPodLabels labels the StatefulSet pods; the headless Service and
-// PodDisruptionBudget select on the same set.
+// etcdPodLabels labels the StatefulSet pods; the headless Service,
+// PodDisruptionBudget and PodMonitor select on the same set.
 func etcdPodLabels(ec *ecv1alpha1.EtcdCluster) map[string]string {
 	return map[string]string{
 		"app":        ec.Name,
