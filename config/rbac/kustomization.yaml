@@ -28,4 +28,6 @@ resources:
 - etcdbackup_viewer_role.yaml
 - etcdrestore_editor_role.yaml
 - etcdrestore_viewer_role.yaml
+- etcdmirror_editor_role.yaml
+- etcdmirror_viewer_role.yaml
 

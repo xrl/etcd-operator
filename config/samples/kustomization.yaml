@@ -4,4 +4,5 @@ resources:
 - operator_v1alpha1_etcdbackup.yaml
 - operator_v1alpha1_etcdrestore.yaml
 - sample_metrics_etcdcluster.yaml
+- operator_v1alpha1_etcdmirror.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
