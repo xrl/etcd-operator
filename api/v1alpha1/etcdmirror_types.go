@@ -544,7 +544,10 @@ const (
 	// a forced resync (then with condition Compacted=True/Reason=ForcedResync).
 	EtcdMirrorPhaseInitialSync EtcdMirrorPhase = "InitialSync"
 	// EtcdMirrorPhaseSyncing is the steady state: watching and applying live
-	// changes, watermark advancing via progress notifications.
+	// changes, watermark advancing via progress notifications. A completed
+	// drain also reports Syncing (there is no Drained phase — a finished
+	// cutover is not page-worthy); the CutoverReady condition carries the
+	// drain outcome.
 	EtcdMirrorPhaseSyncing EtcdMirrorPhase = "Syncing"
 	// EtcdMirrorPhaseDegraded means the agent is in a retry/backoff loop
 	// (connection or throttling class) and is expected to self-heal. Forced
@@ -573,7 +576,10 @@ const (
 	// advancing (via applies or watch progress notifications) within the
 	// staleness threshold. Watermark-derived, not apply-derived: an idle
 	// prefix on a live watch stays Available; a wedged loop that stops
-	// confirming progress does not.
+	// confirming progress does not. Exception: after a completed, verified
+	// drain the watermark never advances again by design, and Available
+	// stays True with reason DrainComplete (phase remains Syncing;
+	// CutoverReady carries the outcome — a finished cutover must not page).
 	EtcdMirrorConditionAvailable = "Available"
 	// EtcdMirrorConditionSourceReachable is True when the agent's last
 	// attempt to reach Source succeeded. Split from TargetReachable because
@@ -618,7 +624,7 @@ const (
 	// current revision for a sustained duration. Both terms come from the
 	// same watch/progress machinery (never from comparing the two live
 	// status fields, which snapshot at different instants). Threshold and
-	// duration are agent-internal constants in v1.
+	// duration are controller-internal constants in v1.
 	EtcdMirrorConditionReplicationLagExceeded = "ReplicationLagExceeded"
 	// EtcdMirrorConditionDriftDetected is True when the last reconciliation
 	// pass found orphaned/missing keys. Carries counts in Message. Sticky
@@ -715,6 +721,13 @@ const (
 	// "compaction won a race the design eliminates". Repeated occurrences
 	// count toward ResyncLoopDetected.
 	EtcdMirrorEventInitialSyncCompactionRaced = "InitialSyncCompactionRaced"
+	// EtcdMirrorEventCertificateExpiringSoon warns that a referenced TLS
+	// certificate (client leaf or CA) expires within the controller's
+	// lead window; the agent's expiry gauge is the metric counterpart.
+	EtcdMirrorEventCertificateExpiringSoon = "CertificateExpiringSoon"
+	// EtcdMirrorEventInsecureSkipVerifyEnabled is the standing Warning
+	// promised by EtcdMirrorTLS.InsecureSkipVerify's contract.
+	EtcdMirrorEventInsecureSkipVerifyEnabled = "InsecureSkipVerifyEnabled"
 )
 
 // EtcdMirrorStatus defines the observed state of an EtcdMirror. Progress
@@ -796,6 +809,12 @@ type EtcdMirrorStatus struct {
 	// corrupt/unknown-version). Monotonic, never reset.
 	// +optional
 	ForcedResyncCount int32 `json:"forcedResyncCount,omitempty"`
+
+	// ScanRestartCount counts genesis-scan attempts aborted and restarted
+	// from a fresh R0 (watch-buffer overflow or a mid-scan watch compaction;
+	// see the InitialSyncCompactionRaced event). Monotonic, never reset.
+	// +optional
+	ScanRestartCount int64 `json:"scanRestartCount,omitempty"`
 
 	// LastReconciliationTime and LastReconciliationDrift record the most
 	// recent reconciliation pass (periodic or mandatory).

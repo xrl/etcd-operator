@@ -32,6 +32,25 @@ func newTestAgent(t *testing.T) *Agent {
 	return a
 }
 
+// TestApplySuccessClearsErrorFields: the wire contract for all three
+// last-error fields is "" once the last attempt succeeded — a healed
+// transient (e.g. a pre-claim fence race) must not leave a stale
+// lastErrorReason behind.
+func TestApplySuccessClearsErrorFields(t *testing.T) {
+	a := newTestAgent(t)
+	a.recordErr(&FenceError{Detail: "raced"}, ClassTransient)
+	s := a.Snapshot()
+	require.Equal(t, "FenceLost", s.LastErrorReason)
+	require.NotEmpty(t, s.LastError)
+
+	a.noteApplySuccess(2, PhaseSyncing)
+	s = a.Snapshot()
+	require.Empty(t, s.LastError)
+	require.Empty(t, s.LastErrorClass)
+	require.Empty(t, s.LastErrorReason)
+	require.Equal(t, int64(2), s.KeysAppliedTotal)
+}
+
 func TestSnapshotForcedResyncCountByReason(t *testing.T) {
 	a := newTestAgent(t)
 	a.noteResync(&ResyncError{Reason: ResyncReasonCompacted, Cause: errors.New("x")})
@@ -100,6 +119,9 @@ func TestSnapshotJSONWireNames(t *testing.T) {
 		LastReconcileDrift:        &Drift{MissingKeys: 1, DivergentKeys: 2, OrphanKeys: 3, Repaired: true},
 		LastError:                 "boom",
 		LastErrorClass:            ClassTransient,
+		LastErrorReason:           "InvalidConfig",
+		SourceLearner:             true,
+		TargetLearner:             true,
 		CutoverReady:              true,
 		Cutover: &CutoverStatus{
 			DrainTargetRevision: 1, DrainedRevision: 2, VerifiedTime: now,
@@ -130,6 +152,7 @@ func TestSnapshotJSONWireNames(t *testing.T) {
 		"resyncLoopDetected", "scanRestartCount", "lastScanRestartCause",
 		"sourceKeyCount", "targetKeyCount", "throttled", "quotaExhausted", "compacted",
 		"lastReconcileTime", "lastReconcileDrift", "lastError", "lastErrorClass",
+		"lastErrorReason", "sourceLearner", "targetLearner",
 		"cutoverReady", "cutover",
 	}
 	require.ElementsMatch(t, wantFull, mapKeys(fullKeys))

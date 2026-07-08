@@ -71,6 +71,7 @@ func main() {
 
 	var imageRegistry string
 	var operatorImage string
+	var mirrorAgentImage string
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
@@ -85,6 +86,9 @@ func main() {
 	flag.StringVar(&operatorImage, "operator-image", os.Getenv("OPERATOR_IMAGE"),
 		"The operator's own image, used as the restore init-container that bootstraps a "+
 			"restore-target member from a snapshot. Defaults to the OPERATOR_IMAGE env var.")
+	flag.StringVar(&mirrorAgentImage, "mirror-agent-image", "",
+		"Image for EtcdMirror agent Deployments (the operator image itself; the binary ships at /mirror-agent). "+
+			"EtcdMirror CRs stay Pending until set.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -247,6 +251,14 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "EtcdCluster")
 			os.Exit(1)
 		}
+	}
+	if err = (&controller.EtcdMirrorReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		AgentImage: mirrorAgentImage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "EtcdMirror")
+		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
 
