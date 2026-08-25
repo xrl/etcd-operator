@@ -42,7 +42,7 @@ jobs:
           go-version-file: go.mod
 
       # LAWS-1 + LAWS-2: build each arch natively on the hosted runner (Go cross-compiles,
-      # no QEMU), so the Dockerfile only has to COPY a finished binary.
+      # no QEMU), so the Dockerfile only has to COPY finished binaries.
       - name: Native per-arch build
         run: |
           set -euo pipefail
@@ -51,6 +51,8 @@ jobs:
             echo "::group::go build $ARCH"
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
               go build -trimpath -ldflags '-s -w' -o "dist/manager-$ARCH" ./cmd
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" \
+              go build -trimpath -ldflags '-s -w' -o "dist/mirror-agent-$ARCH" ./cmd/mirror-agent
             echo "::endgroup::"
           done
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -34,6 +34,7 @@ import (
 	"go.etcd.io/etcd-operator/internal/etcdutils"
 	"go.etcd.io/etcd-operator/pkg/certificate"
 	certInterface "go.etcd.io/etcd-operator/pkg/certificate/interfaces"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -177,6 +178,38 @@ func validateTLSSurface(path *field.Path, s *ecv1alpha1.TLSSurface) field.ErrorL
 	return errs
 }
 
+// normalizeEtcdVersion strips an optional leading "v" from an etcd version
+// string. The CoreOS go-semver parser (used for upgrade-path checks here and in
+// the admission webhook) rejects a leading "v", but the canonical etcd release
+// images at the default registry (gcr.io/etcd-development/etcd) are published
+// ONLY with v-prefixed tags (e.g. "v3.5.21"). Users therefore legitimately set
+// spec.version with or without the "v"; normalizing to the bare semver here lets
+// both forms compare and parse identically.
+func normalizeEtcdVersion(version string) string {
+	return strings.TrimPrefix(strings.TrimSpace(version), "v")
+}
+
+// etcdImageTag renders the image tag for spec.version against the configured
+// registry. The default etcd-development registry only publishes v-prefixed
+// tags, so a bare "3.5.21" would resolve to a NotFound "...:3.5.21" image
+// (ImagePullBackOff). We therefore prepend the "v" the registry convention
+// expects whenever the user supplied a bare semver. A version the user already
+// wrote with a leading "v" is passed through unchanged, and a non-semver/custom
+// tag (e.g. a pinned digest-less internal tag) is left exactly as written so
+// non-default registries with their own tagging scheme are not disturbed.
+func etcdImageTag(version string) string {
+	v := strings.TrimSpace(version)
+	if strings.HasPrefix(v, "v") {
+		return v
+	}
+	// Only re-apply the registry's "v" convention to values that are real
+	// semver; anything else is an explicit custom tag we must not rewrite.
+	if _, err := semver.NewVersion(v); err != nil {
+		return v
+	}
+	return "v" + v
+}
+
 type etcdClusterState string
 
 const (
@@ -208,6 +241,9 @@ func etcdContainerResources() corev1.ResourceRequirements {
 	}
 }
 
+// reconcileStatefulSet renders and applies the ConfigMap, member certs and
+// StatefulSet without waiting for readiness; the reconcile-loop gates handle
+// convergence, so recovery paths can use it while pods are down.
 func reconcileStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
 
 	// prepare/update configmap for StatefulSet
@@ -222,20 +258,9 @@ func reconcileStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha
 		return nil, err
 	}
 
-	// Create Update StatefulSet
-	err = createOrPatchStatefulSet(ctx, logger, ec, c, replicas, scheme)
-	if err != nil {
-		return nil, err
-	}
-
-	// Wait for statefulset to be ready
-	err = waitForStatefulSetReady(ctx, logger, c, ec.Name, ec.Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return latest Stateful set. (This is to ensure that we return the latest statefulset for next operation to act on)
-	return getStatefulSet(ctx, c, ec.Name, ec.Namespace)
+	// Create/update StatefulSet. The write response is returned (fresher than a
+	// post-write cache read, which can still hold the pre-write object).
+	return createOrPatchStatefulSet(ctx, logger, ec, c, replicas, scheme)
 }
 
 // tlsArgs captures the per-surface TLS decisions that drive defaultArgs. Each
@@ -262,7 +287,9 @@ func tlsArgsFor(ec *ecv1alpha1.EtcdCluster) tlsArgs {
 	return a
 }
 
-func defaultArgs(name string, tls tlsArgs) []string {
+func defaultArgs(ec *ecv1alpha1.EtcdCluster) []string {
+	name := ec.Name
+	tls := tlsArgsFor(ec)
 	peerScheme := schemeHTTP
 	if tls.peerEnabled {
 		peerScheme = schemeHTTPS
@@ -278,6 +305,16 @@ func defaultArgs(name string, tls tlsArgs) []string {
 		fmt.Sprintf("--listen-client-urls=%s://0.0.0.0:2379", clientScheme), // TODO: only listen on 127.0.0.1 and host IP
 		fmt.Sprintf("--initial-advertise-peer-urls=%s://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2380", peerScheme, name),
 		fmt.Sprintf("--advertise-client-urls=%s://$(POD_NAME).%s.$(POD_NAMESPACE).svc.cluster.local:2379", clientScheme, name),
+	}
+
+	if q := ec.Spec.QuotaBackendBytes; q != nil && !q.IsZero() {
+		args = append(args, fmt.Sprintf("--quota-backend-bytes=%d", q.Value()))
+	}
+	if ec.Spec.AutoCompactionMode != "" {
+		args = append(args, "--auto-compaction-mode="+ec.Spec.AutoCompactionMode)
+	}
+	if ec.Spec.AutoCompactionRetention != "" {
+		args = append(args, "--auto-compaction-retention="+ec.Spec.AutoCompactionRetention)
 	}
 
 	// Server (client-surface) TLS flag group: emitted iff the client surface is set.
@@ -334,8 +371,9 @@ func getArgName(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func createArgs(name string, etcdOptions []string, tls tlsArgs) []string {
-	defaultArgs := defaultArgs(name, tls)
+func createArgs(ec *ecv1alpha1.EtcdCluster) []string {
+	defaultArgs := defaultArgs(ec)
+	etcdOptions := ec.Spec.EtcdOptions
 	if len(etcdOptions) > 0 {
 		var argName string
 		// Remove default arguments if conflicts with user supplied
@@ -348,7 +386,16 @@ func createArgs(name string, etcdOptions []string, tls tlsArgs) []string {
 	return defaultArgs
 }
 
-func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) error {
+// etcdPodLabels labels the StatefulSet pods; the headless Service,
+// PodDisruptionBudget and PodMonitor select on the same set.
+func etcdPodLabels(ec *ecv1alpha1.EtcdCluster) map[string]string {
+	return map[string]string{
+		"app":        ec.Name,
+		"controller": ec.Name,
+	}
+}
+
+func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1alpha1.EtcdCluster, c client.Client, replicas int32, scheme *runtime.Scheme) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ec.Name,
@@ -356,18 +403,15 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		},
 	}
 
-	labels := map[string]string{
-		"app":        ec.Name,
-		"controller": ec.Name,
-	}
+	labels := etcdPodLabels(ec)
 
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{
 			{
 				Name:      "etcd",
 				Command:   []string{"/usr/local/bin/etcd"},
-				Args:      createArgs(ec.Name, ec.Spec.EtcdOptions, tlsArgsFor(ec)),
-				Image:     fmt.Sprintf("%s:%s", ec.Spec.ImageRegistry, ec.Spec.Version),
+				Args:      createArgs(ec),
+				Image:     fmt.Sprintf("%s:%s", ec.Spec.ImageRegistry, etcdImageTag(ec.Spec.Version)),
 				Resources: etcdContainerResources(),
 				Env: []corev1.EnvVar{
 					{
@@ -461,6 +505,12 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		podSpec.Affinity = ec.Spec.PodTemplate.Spec.Affinity
 		podSpec.NodeSelector = ec.Spec.PodTemplate.Spec.NodeSelector
 		podSpec.Tolerations = ec.Spec.PodTemplate.Spec.Tolerations
+		podSpec.TopologySpreadConstraints = ec.Spec.PodTemplate.Spec.TopologySpreadConstraints
+		podSpec.PriorityClassName = ec.Spec.PodTemplate.Spec.PriorityClassName
+		podSpec.SchedulerName = ec.Spec.PodTemplate.Spec.SchedulerName
+		if ec.Spec.PodTemplate.Spec.Resources != nil {
+			podSpec.Containers[0].Resources = *ec.Spec.PodTemplate.Spec.Resources
+		}
 	}
 
 	// Apply custom metadata from PodTemplate if provided
@@ -482,6 +532,9 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 	stsSpec := appsv1.StatefulSetSpec{
 		Replicas:    &replicas,
 		ServiceName: ec.Name,
+		// OnDelete: pods are only replaced when the upgrade gate deletes them,
+		// never rolled automatically on template changes.
+		UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType},
 		Selector: &metav1.LabelSelector{
 			MatchLabels: labels,
 		},
@@ -504,7 +557,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			})
 		// Create a new volume claim template
 		if ec.Spec.StorageSpec.VolumeSizeRequest.Cmp(resource.MustParse("1Mi")) < 0 {
-			return fmt.Errorf("VolumeSizeRequest must be at least 1Mi")
+			return nil, fmt.Errorf("VolumeSizeRequest must be at least 1Mi")
 		}
 
 		if ec.Spec.StorageSpec.VolumeSizeLimit.IsZero() {
@@ -538,7 +591,7 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 			}
 		case corev1.ReadWriteMany:
 			if ec.Spec.StorageSpec.PVCName == "" {
-				return fmt.Errorf("PVCName must be set when AccessModes is ReadWriteMany")
+				return nil, fmt.Errorf("PVCName must be set when AccessModes is ReadWriteMany")
 			}
 			stsSpec.Template.Spec.Volumes = append(stsSpec.Template.Spec.Volumes, corev1.Volume{
 				Name: volumeName,
@@ -549,8 +602,21 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 				},
 			})
 		default:
-			return fmt.Errorf("AccessMode %s is not supported", ec.Spec.StorageSpec.AccessModes)
+			return nil, fmt.Errorf("AccessMode %s is not supported", ec.Spec.StorageSpec.AccessModes)
 		}
+	}
+
+	// Restore-target clusters (marked by the EtcdRestore controller with the
+	// restore-source annotation) get a single restore init-container that
+	// bootstraps the genesis member's data dir from a snapshot before etcd
+	// starts. A normal cluster carries no such annotation and its pod template is
+	// left byte-identical (zero init-containers / no extra volumes), so the
+	// existing cluster reconcile/e2e is unaffected.
+	if src, ok, srcErr := restoreSourceFromCluster(ec); srcErr != nil {
+		return nil, fmt.Errorf("invalid restore-source annotation on EtcdCluster %s/%s: %w",
+			ec.Namespace, ec.Name, srcErr)
+	} else if ok {
+		applyRestoreInitContainers(&stsSpec.Template.Spec, ec, src)
 	}
 
 	logger.Info("Now creating/updating statefulset", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
@@ -570,46 +636,11 @@ func createOrPatchStatefulSet(ctx context.Context, logger logr.Logger, ec *ecv1a
 		return nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	logger.Info("Stateful set created/updated", "name", ec.Name, "namespace", ec.Namespace, "replicas", replicas)
-	return nil
-}
-
-func waitForStatefulSetReady(ctx context.Context, logger logr.Logger, r client.Client, name, namespace string) error {
-	logger.Info("Now checking the readiness of statefulset", "name", name, "namespace", namespace)
-
-	backoff := wait.Backoff{
-		Duration: 3 * time.Second,
-		Factor:   2.0,
-		Steps:    5,
-	}
-
-	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
-		// Fetch the StatefulSet
-		sts, err := getStatefulSet(ctx, r, name, namespace)
-		if err != nil {
-			return false, err
-		}
-
-		// Check if the StatefulSet is ready
-		if sts.Status.ReadyReplicas == *sts.Spec.Replicas {
-			// StatefulSet is ready
-			logger.Info("StatefulSet is ready", "name", name, "namespace", namespace)
-			return true, nil
-		}
-
-		// Log the current status
-		logger.Info("StatefulSet is not ready", "ReadyReplicas", strconv.Itoa(int(sts.Status.ReadyReplicas)), "DesiredReplicas", strconv.Itoa(int(*sts.Spec.Replicas)))
-		return false, nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("StatefulSet %s/%s did not become ready: %w", namespace, name, err)
-	}
-
-	return nil
+	return sts, nil
 }
 
 func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c client.Client, ec *ecv1alpha1.EtcdCluster, scheme *runtime.Scheme) error {
@@ -620,10 +651,7 @@ func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c 
 		if k8serrors.IsNotFound(err) {
 			logger.Info("Headless service does not exist. Creating headless service")
 
-			labels := map[string]string{
-				"app":        ec.Name,
-				"controller": ec.Name,
-			}
+			labels := etcdPodLabels(ec)
 			// Create the headless service
 			headlessSvc := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
@@ -742,6 +770,71 @@ func clientEndpointForOrdinalIndex(sts *appsv1.StatefulSet, index int, scheme st
 		scheme, sts.Name, index, sts.Name, sts.Namespace)
 }
 
+// scaleInTargetID returns the ID of the highest-ordinal member — the pod the
+// StatefulSet scale-in deletes. Members run with --name=$(POD_NAME), so match
+// by name against the authoritative member list; the target need not be
+// reachable. memberHealth can't be used here: it is sorted lexically by
+// endpoint, so its last element is wrong once ordinals reach 10.
+func scaleInTargetID(sts *appsv1.StatefulSet, members []*etcdserverpb.Member) (uint64, error) {
+	if len(members) == 0 {
+		return 0, errors.New("no members eligible for scale-in")
+	}
+	name := fmt.Sprintf("%s-%d", sts.Name, len(members)-1)
+	for _, m := range members {
+		if m.Name == name {
+			return m.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("scale-in target %s not found in member list", name)
+}
+
+// transfereeForScaleIn returns the lowest-ordinal healthy voting member other
+// than removeID; ok=false when none exists.
+func transfereeForScaleIn(sts *appsv1.StatefulSet, healthInfos []etcdutils.EpHealth,
+	removeID uint64, scheme string) (uint64, bool) {
+	byEp := make(map[string]etcdutils.EpHealth, len(healthInfos))
+	for _, h := range healthInfos {
+		byEp[h.Ep] = h
+	}
+	for i := range healthInfos {
+		h, ok := byEp[clientEndpointForOrdinalIndex(sts, i, scheme)]
+		if !ok || !h.Health || h.Status == nil || h.Status.Header == nil ||
+			h.Status.IsLearner || h.Status.Header.MemberId == removeID {
+			continue
+		}
+		return h.Status.Header.MemberId, true
+	}
+	return 0, false
+}
+
+// removeScaleInMember transfers leadership away from the removal target when
+// it is the leader (best-effort), then removes it from the etcd cluster.
+// moveLeader/removeMember are parameters so tests can stub the etcd calls;
+// production passes etcdutils.MoveLeader and etcdutils.RemoveMember.
+func removeScaleInMember(logger logr.Logger, s *reconcileState, leaderID uint64, eps []string,
+	scheme string, tlsConfig *tls.Config,
+	moveLeader, removeMember func([]string, uint64, *tls.Config) error) error {
+	members := s.memberListResp.Members
+	memberID, err := scaleInTargetID(s.sts, members)
+	if err != nil {
+		return err
+	}
+	if memberID == leaderID {
+		if transferee, ok := transfereeForScaleIn(s.sts, s.memberHealth, memberID, scheme); ok {
+			logger.Info("[Scale in] transferring leadership off removal target",
+				"leaderID", memberID, "transfereeID", transferee)
+			// MoveLeader must be served by the leader itself.
+			leaderEp := clientEndpointForOrdinalIndex(s.sts, len(members)-1, scheme)
+			if err := moveLeader([]string{leaderEp}, transferee, tlsConfig); err != nil {
+				// Best-effort: removing a leader is legal; the transfer only avoids an election stall.
+				logger.Error(err, "leadership transfer failed, proceeding with removal")
+			}
+		}
+	}
+	logger.Info("[Scale in] removing one member", "memberID", memberID)
+	return removeMember(eps, memberID, tlsConfig)
+}
+
 func getStatefulSet(ctx context.Context, c client.Client, name, namespace string) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{}
 	err := c.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, sts)
@@ -749,6 +842,16 @@ func getStatefulSet(ctx context.Context, c client.Client, name, namespace string
 		return nil, err
 	}
 	return sts, nil
+}
+
+// statefulSetSpecObserved reports whether the StatefulSet controller has seen the latest spec write.
+func statefulSetSpecObserved(sts *appsv1.StatefulSet) bool {
+	return sts.Status.ObservedGeneration >= sts.Generation
+}
+
+// isStatefulSetSettled additionally requires every desired replica to be ready.
+func isStatefulSetSettled(sts *appsv1.StatefulSet) bool {
+	return statefulSetSpecObserved(sts) && sts.Spec.Replicas != nil && sts.Status.ReadyReplicas == *sts.Spec.Replicas
 }
 
 // clientEndpointsFromStatefulsets builds the operator's client endpoints. scheme
@@ -844,18 +947,41 @@ func getPeerCertName(etcdClusterName string) string {
 	return peerCertName
 }
 
+// validityDurationDayPrefix matches a leading integer day segment, e.g. "365d" or the "100d" in "100d12h".
+var validityDurationDayPrefix = regexp.MustCompile(`^(\d+)d`)
+
 // parseValidityDuration parses a duration string and returns the parsed duration.
 // If the customizedDuration is empty, it returns the defaultDuration.
+// A leading day segment (e.g. "365d", "100d12h") is expanded to hours, since
+// time.ParseDuration does not support the "d" unit.
 // Returns an error if the duration string cannot be parsed.
 func parseValidityDuration(customizedDuration string, defaultDuration time.Duration) (time.Duration, error) {
 	if customizedDuration == "" {
 		return defaultDuration, nil
+	}
+	if m := validityDurationDayPrefix.FindStringSubmatch(customizedDuration); m != nil {
+		days, err := strconv.Atoi(m[1])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse ValidityDuration: %w", err)
+		}
+		customizedDuration = fmt.Sprintf("%dh%s", days*24, customizedDuration[len(m[0]):])
 	}
 	duration, err := time.ParseDuration(customizedDuration)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse ValidityDuration: %w", err)
 	}
 	return duration, nil
+}
+
+// validateAltNameIPs rejects nil/empty entries so that invalid IP addresses
+// never reach certificate providers.
+func validateAltNameIPs(ips []net.IP) error {
+	for i, ip := range ips {
+		if len(ip) == 0 {
+			return fmt.Errorf("altNames.ipAddresses[%d] is not a valid IP address", i)
+		}
+	}
+	return nil
 }
 
 func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.TLSSurface) (*certInterface.Config, error) {
@@ -870,11 +996,15 @@ func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.T
 		return nil, err
 	}
 
+	if err := validateAltNameIPs(cmConfig.AltNames.IPs); err != nil {
+		return nil, err
+	}
+
 	var getAltNames certInterface.AltNames
 	if cmConfig.AltNames.DNSNames != nil {
 		getAltNames = certInterface.AltNames{
 			DNSNames: cmConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(cmConfig.AltNames.DNSNames)),
+			IPs:      cmConfig.AltNames.IPs,
 		}
 	} else {
 		// Use wildcard DNS for the cluster's headless service to cover all pods
@@ -885,6 +1015,7 @@ func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1.T
 		}
 		getAltNames = certInterface.AltNames{
 			DNSNames: defaultDNSNames,
+			IPs:      cmConfig.AltNames.IPs,
 		}
 	}
 
@@ -920,11 +1051,15 @@ func createAutoCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1
 		return nil, err
 	}
 
+	if err := validateAltNameIPs(autoConfig.AltNames.IPs); err != nil {
+		return nil, err
+	}
+
 	var altNames certInterface.AltNames
 	if autoConfig.AltNames.DNSNames != nil {
 		altNames = certInterface.AltNames{
 			DNSNames: autoConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(autoConfig.AltNames.DNSNames)),
+			IPs:      autoConfig.AltNames.IPs,
 		}
 	} else {
 		// Use wildcard DNS for the cluster's headless service to cover all pods
@@ -935,6 +1070,7 @@ func createAutoCertificateConfig(ec *ecv1alpha1.EtcdCluster, surface *ecv1alpha1
 		}
 		altNames = certInterface.AltNames{
 			DNSNames: defaultDNSNames,
+			IPs:      autoConfig.AltNames.IPs,
 		}
 	}
 
@@ -1146,11 +1282,14 @@ func validateEtcdUpgradePath(etcdVersions []semver.Version, current, target stri
 		currentIdx, targetIdx = -1, -1
 	)
 
-	currentVer, err = semver.NewVersion(current)
+	// The live StatefulSet image tag is v-prefixed (the registry convention) while
+	// spec.version may be bare; normalize both so go-semver can parse them and so a
+	// "v3.5.21" image vs a "3.5.21" spec is not mistaken for a version change.
+	currentVer, err = semver.NewVersion(normalizeEtcdVersion(current))
 	if err != nil {
 		return false, fmt.Errorf("failed to parse current version %s: %w", current, err)
 	}
-	targetVer, err = semver.NewVersion(target)
+	targetVer, err = semver.NewVersion(normalizeEtcdVersion(target))
 	if err != nil {
 		return false, fmt.Errorf("failed to parse target version %s: %w", target, err)
 	}

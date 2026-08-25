@@ -28,6 +28,8 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // EtcdClusterSpec defines the desired state of EtcdCluster.
+// +kubebuilder:validation:XValidation:rule="!has(self.autoCompactionMode) || has(self.autoCompactionRetention)",message="autoCompactionRetention must be set when autoCompactionMode is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.autoCompactionMode) || self.autoCompactionMode != 'revision' || (has(self.autoCompactionRetention) && self.autoCompactionRetention.matches('^[0-9]+$'))",message="autoCompactionRetention must be an integer revision count when autoCompactionMode is 'revision'"
 type EtcdClusterSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -56,8 +58,98 @@ type EtcdClusterSpec struct {
 	TLS *EtcdClusterTLS `json:"tls,omitempty"`
 	// etcd configuration options are passed as command line arguments to the etcd container, refer to etcd documentation for configuration options applicable for the version of etcd being used.
 	EtcdOptions []string `json:"etcdOptions,omitempty"`
+	// QuotaBackendBytes is the etcd backend storage quota (--quota-backend-bytes).
+	// When exceeded etcd raises a NOSPACE alarm and becomes read-only.
+	// Unset means the etcd default (2GiB). etcd recommends at most 8GiB.
+	// Must be at least 100Mi: etcd disables the quota for non-positive
+	// values, and a byte-scale typo ("8" instead of "8Gi") would alarm the
+	// whole cluster read-only on the first pod restart. Lowering the quota
+	// below the current DB size has the same read-only effect.
+	// +kubebuilder:validation:XValidation:rule="!quantity(string(self)).isLessThan(quantity('100Mi'))",message="quotaBackendBytes must be at least 100Mi"
+	// +optional
+	QuotaBackendBytes *resource.Quantity `json:"quotaBackendBytes,omitempty"`
+	// AutoCompactionMode selects the MVCC auto-compaction policy (--auto-compaction-mode).
+	// +kubebuilder:validation:Enum=periodic;revision
+	// +optional
+	AutoCompactionMode string `json:"autoCompactionMode,omitempty"`
+	// AutoCompactionRetention is the retention window for auto compaction
+	// (--auto-compaction-retention): a duration such as "5m"/"1h" in periodic
+	// mode, or a revision count in revision mode. "0" disables auto compaction.
+	// +kubebuilder:validation:Pattern=`^([0-9]+[smh])+$|^[0-9]+$`
+	// +optional
+	AutoCompactionRetention string `json:"autoCompactionRetention,omitempty"`
 	// PodTemplate is the pod template to use for the etcd cluster.
 	PodTemplate *PodTemplate `json:"podTemplate,omitempty"`
+	// Metrics configures Prometheus observability for this cluster. When unset,
+	// the operator still exports its own per-cluster domain metrics on its
+	// /metrics endpoint, but does not create a PodMonitor for the etcd member
+	// pods. See MetricsSpec for the available knobs.
+	// +optional
+	Metrics *MetricsSpec `json:"metrics,omitempty"`
+}
+
+// MetricsSpec configures Prometheus observability for an EtcdCluster.
+type MetricsSpec struct {
+	// Enabled toggles emission of the operator's per-cluster domain metrics
+	// (member counts, quorum, leader changes, reconcile timings, etc.) for this
+	// cluster. When nil it defaults to true: metrics are exported unless
+	// explicitly disabled. Disabling drops the cluster's series from the
+	// operator's /metrics endpoint.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// PodMonitor, when set and enabled, instructs the operator to create and
+	// maintain a prometheus-operator PodMonitor selecting this cluster's etcd
+	// member pods so that Prometheus scrapes etcd's own /metrics endpoint.
+	// This requires the prometheus-operator PodMonitor CRD to be installed in
+	// the cluster; if it is absent the operator logs and skips PodMonitor
+	// reconciliation without failing the rest of the reconcile.
+	// +optional
+	PodMonitor *PodMonitorSpec `json:"podMonitor,omitempty"`
+}
+
+// PodMonitorSpec controls creation of a PodMonitor for the etcd member pods.
+type PodMonitorSpec struct {
+	// Enabled toggles creation of the PodMonitor. Defaults to false.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Interval at which Prometheus scrapes the etcd member pods, e.g. "30s".
+	// When empty the prometheus-operator default is used.
+	// +optional
+	Interval string `json:"interval,omitempty"`
+
+	// Port is the name of the pod port exposing etcd's /metrics endpoint.
+	// Defaults to "client" when empty.
+	// +optional
+	Port string `json:"port,omitempty"`
+
+	// Labels are additional metadata labels to set on the generated
+	// PodMonitor. They are merged on top of the operator-managed labels
+	// (app.kubernetes.io/name, /managed-by, /instance): user-provided keys
+	// take precedence on conflict. This is typically used to satisfy a
+	// namespaced Prometheus's podMonitorSelector, e.g. setting
+	// "release: kvs-prometheus" so a release-scoped Prometheus discovers and
+	// scrapes this PodMonitor. When empty, only the operator-managed labels
+	// are applied (today's behavior).
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// MetricsEnabled reports whether per-cluster domain metrics should be exported
+// for this cluster. Metrics are on by default and only disabled when
+// spec.metrics.enabled is explicitly set to false.
+func (s *EtcdClusterSpec) MetricsEnabled() bool {
+	if s.Metrics == nil || s.Metrics.Enabled == nil {
+		return true
+	}
+	return *s.Metrics.Enabled
+}
+
+// PodMonitorEnabled reports whether a PodMonitor should be reconciled for this
+// cluster's etcd member pods.
+func (s *EtcdClusterSpec) PodMonitorEnabled() bool {
+	return s.MetricsEnabled() && s.Metrics != nil && s.Metrics.PodMonitor != nil && s.Metrics.PodMonitor.Enabled
 }
 
 type PodTemplate struct {
@@ -70,6 +162,26 @@ type PodSpec struct {
 	Affinity     *corev1.Affinity    `json:"affinity,omitempty"`
 	NodeSelector map[string]string   `json:"nodeSelector,omitempty"`
 	Tolerations  []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// TopologySpreadConstraints describes how member pods should spread across topology
+	// domains, typically zones or hosts. The labelSelector must match the member pod
+	// labels, e.g. "app: <cluster-name>".
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// Resources describes the compute resource requirements of the etcd container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// PriorityClassName is the priority class of the member pods,
+	// e.g. "system-cluster-critical".
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// SchedulerName dispatches the member pods to a specific scheduler instead of the
+	// default one.
+	// +optional
+	SchedulerName string `json:"schedulerName,omitempty"`
 }
 
 type PodMetadata struct {
@@ -249,6 +361,124 @@ type EtcdClusterStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+
+	// Recovery captures the state of an in-progress (or last attempted) automatic
+	// disaster recovery from quorum loss. It is managed entirely by the operator's
+	// quorum-loss recovery state machine and is nil when no recovery has ever been
+	// attempted.
+	// +optional
+	Recovery *RecoveryStatus `json:"recovery,omitempty"`
+}
+
+// RecoveryPhase enumerates the stages of the automatic quorum-loss recovery
+// state machine. The phases form a strict, idempotent progression so that the
+// controller can resume recovery safely after a restart or a transient error.
+type RecoveryPhase string
+
+const (
+	// RecoveryPhaseDetecting means the controller has observed a candidate
+	// quorum-loss event but has not yet confirmed it is sustained (it may still
+	// be a transient blip that self-heals before the grace window elapses).
+	RecoveryPhaseDetecting RecoveryPhase = "Detecting"
+	// RecoveryPhaseRebuilding means sustained quorum loss was confirmed and the
+	// controller is rebuilding a single-member cluster from a surviving member
+	// using --force-new-cluster.
+	RecoveryPhaseRebuilding RecoveryPhase = "Rebuilding"
+	// RecoveryPhaseScalingOut means the single-member cluster is healthy again
+	// and the controller is re-adding the remaining members one at a time via
+	// the normal learner-add path.
+	RecoveryPhaseScalingOut RecoveryPhase = "ScalingOut"
+	// RecoveryPhaseCompleted means the cluster was restored to its desired size
+	// and quorum.
+	RecoveryPhaseCompleted RecoveryPhase = "Completed"
+)
+
+// RecoveryStatus records the progress of the quorum-loss recovery state machine.
+type RecoveryStatus struct {
+	// Phase is the current stage of the recovery state machine.
+	// +optional
+	Phase RecoveryPhase `json:"phase,omitempty"`
+
+	// SurvivorOrdinal is the StatefulSet pod ordinal whose data directory was
+	// chosen as the surviving source of truth for the rebuild. It is always 0
+	// today (the operator keeps ordinal-0's PVC) but is recorded explicitly so
+	// the choice is auditable and future survivor-selection policies remain
+	// backward compatible.
+	// +optional
+	SurvivorOrdinal int32 `json:"survivorOrdinal,omitempty"`
+
+	// DetectedTime is the first time a sustained-quorum-loss candidate was
+	// observed. It anchors the grace window used to distinguish true quorum loss
+	// from transient single-member failures.
+	// +optional
+	DetectedTime *metav1.Time `json:"detectedTime,omitempty"`
+
+	// LastTransitionTime is the time the recovery phase last changed.
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// Message is a human-readable description of the current recovery step.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// Attempts is the number of times the operator has committed to a destructive
+	// rebuild for this cluster (i.e. entered the Rebuilding phase from Detecting).
+	// It is a monotonically increasing counter that survives across recoveries and
+	// is never reset, giving operators a durable signal of how often this cluster
+	// has needed disaster recovery — repeated recoveries usually point at an
+	// underlying infrastructure problem rather than a one-off event.
+	// +optional
+	Attempts int32 `json:"attempts,omitempty"`
+
+	// DataLoss records the data-loss accounting for the most recent rebuild.
+	//
+	// Quorum-loss recovery via --force-new-cluster is NOT a lossless operation:
+	// the rebuilt cluster retains only the writes that were committed to the
+	// surviving member's local data directory. Any write that a now-destroyed
+	// majority had committed but had not yet replicated to the survivor is GONE.
+	// This field surfaces that fact explicitly (alongside a Warning Event, the
+	// DataLossPossible condition, and structured logs) so the loss is auditable
+	// and never silent. It is nil until a rebuild from a survivor completes.
+	// +optional
+	DataLoss *DataLossInfo `json:"dataLoss,omitempty"`
+}
+
+// DataLossInfo captures what the operator knows about the data retained by — and
+// therefore the data potentially lost during — a force-new-cluster rebuild.
+//
+// The operator cannot enumerate exactly which keys were lost (the members that
+// held the un-replicated writes are gone), so this records the provable lower
+// bound on retained state: the survivor's identity and its last committed
+// revision. Everything the destroyed majority committed beyond SurvivorRevision
+// is unrecoverable.
+type DataLossInfo struct {
+	// SurvivorMemberID is the hex-encoded etcd member ID of the survivor whose
+	// data directory was used to rebuild the cluster.
+	// +optional
+	SurvivorMemberID string `json:"survivorMemberID,omitempty"`
+
+	// SurvivorRevision is the key-value store revision present on the survivor at
+	// the moment the single-member cluster came back healthy. It is the highest
+	// revision guaranteed to be retained; any revision the lost majority committed
+	// above this value did not survive the rebuild.
+	// +optional
+	SurvivorRevision int64 `json:"survivorRevision,omitempty"`
+
+	// RaftIndex is the survivor's raft committed index at rebuild time, recorded
+	// for forensic correlation with member logs.
+	// +optional
+	RaftIndex uint64 `json:"raftIndex,omitempty"`
+
+	// RecoveredTime is when the rebuilt single-member cluster was confirmed
+	// healthy and this accounting was captured.
+	// +optional
+	RecoveredTime *metav1.Time `json:"recoveredTime,omitempty"`
+
+	// Message is a human-readable, operator-facing summary of the data-loss
+	// situation, e.g. "recovered with possible data loss; rebuilt from member
+	// <id> at revision <r>".
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // MemberStatus defines the observed state of a single etcd member.

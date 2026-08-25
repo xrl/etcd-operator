@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Install lane (deploy design B App 1, D4 Option B). This overlay is rendered by
+# the ELEVATED CRD-install ArgoCD app and emits ONLY:
+#   - the operator.etcd.io CRDs (etcdclusters/backups/restores)
+#   - the two cluster-scoped Validating/Mutating WebhookConfigurations, each
+#     constrained with namespaceSelector{kubernetes.io/metadata.name: kv} so a
+#     fail-closed (failurePolicy: Fail) webhook backed by a kv-only operator
+#     only intercepts EtcdCluster writes in kv — never in other namespaces.
+# It MUST NOT emit any monitoring.coreos.com CRD (D13 — the central
+# prometheus-operator owns those).
+#
+# The webhook clientConfig service.namespace is rewritten to kv so the API server
+# reaches the webhook server running in the kv namespace.
+namespace: kv
+
+resources:
+  - ../crd
+  - manifests.yaml            # the 2 WebhookConfigurations ONLY (copied from ../webhook;
+                              # the webhook Service is emitted by the operator overlay, not here, to
+                              # avoid two ArgoCD apps both owning it)
+
+# Teach kustomize to rewrite the webhook clientConfig service.namespace to kv
+# (the `namespace: kv` directive above) so the API server reaches the webhook
+# server running in kv.
+configurations:
+  - kustomizeconfig.yaml
+
+patches:
+  # Constrain both fail-closed webhooks to the kv namespace only.
+  - path: webhook_namespaceselector_patch.yaml
+    target:
+      group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+  - path: webhook_namespaceselector_patch.yaml
+    target:
+      group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration

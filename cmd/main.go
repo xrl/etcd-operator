@@ -27,6 +27,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -35,6 +36,7 @@ import (
 
 	operatorv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
 	"go.etcd.io/etcd-operator/internal/controller"
+	"go.etcd.io/etcd-operator/internal/metrics"
 	// nolint:gci
 	// +kubebuilder:scaffold:imports
 )
@@ -58,7 +60,18 @@ func init() {
 }
 
 func main() {
+	// Subcommand dispatch: the operator image doubles as the restore
+	// download helper. When invoked as `manager restore-download` (by the
+	// restore download init-container the cluster controller injects), stream
+	// the snapshot out of object storage and exit, never starting the manager.
+	if len(os.Args) > 1 && os.Args[1] == "restore-localize" {
+		runRestoreLocalize()
+		return
+	}
+
 	var imageRegistry string
+	var operatorImage string
+	var mirrorAgentImage string
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
@@ -66,9 +79,16 @@ func main() {
 	var enableHTTP2 bool
 	var maxConcurrentReconciles int
 	var etcdCPURequest string
+	var watchNamespace string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&imageRegistry, "image-registry", "gcr.io/etcd-development/etcd",
 		"The container registry to pull etcd images from. Defaults to gcr.io/etcd-development/etcd.")
+	flag.StringVar(&operatorImage, "operator-image", os.Getenv("OPERATOR_IMAGE"),
+		"The operator's own image, used as the restore init-container that bootstraps a "+
+			"restore-target member from a snapshot. Defaults to the OPERATOR_IMAGE env var.")
+	flag.StringVar(&mirrorAgentImage, "mirror-agent-image", "",
+		"Image for EtcdMirror agent Deployments (the operator image itself; the binary ships at /mirror-agent). "+
+			"EtcdMirror CRs stay Pending until set.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -91,6 +111,14 @@ func main() {
 			"BestEffort to Burstable QoS and raises its cpu.shares floor without ever throttling "+
 			"etcd. Set to \"\" or \"0\" to apply no request (original BestEffort behavior) so the "+
 			"effect can be A/B-measured. Defaults to "+controller.DefaultEtcdCPURequest+".")
+	flag.StringVar(&watchNamespace, "watch-namespace", os.Getenv("WATCH_NAMESPACE"),
+		"If set, restrict the manager cache/watches to this single namespace. When empty the "+
+			"manager caches cluster-wide (upstream default). The downstream ndp-us-dev deploy sets "+
+			"this to \"kv\" so the operator's cache/informers only touch the kv namespace, which "+
+			"(together with the namespaced Role) keeps the operator identity purely namespaced. "+
+			"NOTE: this scopes the cache only; controller-runtime still builds a global cluster "+
+			"cache, so cluster-scoped reads (e.g. a ClusterIssuer) are stopped by RBAC, not by this "+
+			"flag — the admission guard rejecting issuerKind=ClusterIssuer is what makes that safe.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -103,6 +131,10 @@ func main() {
 	// operator-wide tuning lever (identical for every cluster), so it is a flag
 	// rather than a CRD field. See controller.EtcdCPURequest.
 	controller.EtcdCPURequest = etcdCPURequest
+
+	// Register the operator's custom per-cluster domain metrics with the
+	// controller-runtime global registry so they are served on /metrics.
+	metrics.MustRegister()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -145,7 +177,7 @@ func main() {
 		// this setup is not recommended for production.
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -163,7 +195,21 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+
+	// When --watch-namespace (or WATCH_NAMESPACE) is set, scope the manager's
+	// cache to that single namespace via DefaultNamespaces. This narrows every
+	// informer LIST/WATCH the manager issues to the one namespace, so the
+	// operator runs against a namespaced Role instead of a ClusterRole. Leaving
+	// it empty preserves the upstream cluster-wide behavior.
+	if watchNamespace != "" {
+		setupLog.Info("restricting manager cache to a single namespace", "namespace", watchNamespace)
+		mgrOptions.Cache = cache.Options{
+			DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -176,6 +222,42 @@ func main() {
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EtcdCluster")
+		os.Exit(1)
+	}
+	if err = (&controller.EtcdBackupReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		RESTConfig: mgr.GetConfig(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "EtcdBackup")
+		os.Exit(1)
+	}
+	if err = (&controller.EtcdRestoreReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		RESTConfig:    mgr.GetConfig(),
+		OperatorImage: operatorImage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "EtcdRestore")
+		os.Exit(1)
+	}
+
+	// Register the EtcdCluster validating + defaulting admission webhooks. The
+	// webhook server is already wired above; this is the registration that was
+	// previously missing (see issue #380). Skip when ENABLE_WEBHOOKS=false, which
+	// is convenient for local `make run` without serving certs.
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err = (&operatorv1alpha1.EtcdCluster{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "EtcdCluster")
+			os.Exit(1)
+		}
+	}
+	if err = (&controller.EtcdMirrorReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		AgentImage: mirrorAgentImage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "EtcdMirror")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

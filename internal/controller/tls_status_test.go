@@ -251,13 +251,13 @@ func TestTLSReadyCondition(t *testing.T) {
 
 	t.Run("not configured => no TLSReady condition", func(t *testing.T) {
 		s := newStateWithTLS(tlsReadiness{configured: false, reason: reasonTLSNotConfigured})
-		r.updateConditions(s)
+		r.updateConditions(s, nil)
 		assert.Nil(t, meta.FindStatusCondition(s.cluster.Status.Conditions, tlsReadyConditionType))
 	})
 
 	t.Run("ready => TLSReady True", func(t *testing.T) {
 		s := newStateWithTLS(tlsReadiness{configured: true, ready: true, reason: reasonTLSReady, message: "ok"})
-		r.updateConditions(s)
+		r.updateConditions(s, nil)
 		cond := meta.FindStatusCondition(s.cluster.Status.Conditions, tlsReadyConditionType)
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
@@ -275,7 +275,7 @@ func TestTLSReadyCondition(t *testing.T) {
 	for _, reason := range failureReasons {
 		t.Run("failure "+reason+" => TLSReady False with reason", func(t *testing.T) {
 			s := newStateWithTLS(tlsReadiness{configured: true, ready: false, reason: reason, message: "boom"})
-			r.updateConditions(s)
+			r.updateConditions(s, nil)
 			cond := meta.FindStatusCondition(s.cluster.Status.Conditions, tlsReadyConditionType)
 			require.NotNil(t, cond)
 			assert.Equal(t, metav1.ConditionFalse, cond.Status)
@@ -285,11 +285,11 @@ func TestTLSReadyCondition(t *testing.T) {
 
 	t.Run("flipping back to cleartext removes a stale TLSReady", func(t *testing.T) {
 		s := newStateWithTLS(tlsReadiness{configured: true, ready: true, reason: reasonTLSReady})
-		r.updateConditions(s)
+		r.updateConditions(s, nil)
 		require.NotNil(t, meta.FindStatusCondition(s.cluster.Status.Conditions, tlsReadyConditionType))
 		// Now reconcile the same cluster with no TLS surface.
 		s.tls = tlsReadiness{configured: false, reason: reasonTLSNotConfigured}
-		r.updateConditions(s)
+		r.updateConditions(s, nil)
 		assert.Nil(t, meta.FindStatusCondition(s.cluster.Status.Conditions, tlsReadyConditionType))
 	})
 }

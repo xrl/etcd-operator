@@ -17,12 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
+	certv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,6 +43,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ecv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
+	"go.etcd.io/etcd-operator/internal/etcdutils"
 )
 
 // TestFetchAndValidateState describes the scenarios for the fetchAndValidateState
@@ -135,7 +143,8 @@ func TestFetchAndValidateState(t *testing.T) {
 			},
 			req: ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}},
 			assert: func(t *testing.T, state *reconcileState, res ctrl.Result, err error, _ *ecv1alpha1.EtcdCluster, _ *appsv1.StatefulSet) {
-				assert.Nil(t, state)
+				require.NotNil(t, state)
+				assert.Nil(t, state.sts) // foreign StatefulSet must not leak into status
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "not controlled")
 				assert.Equal(t, ctrl.Result{}, res)
@@ -170,6 +179,51 @@ func TestFetchAndValidateState(t *testing.T) {
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
 								{Image: "gcr.io/etcd-development/etcd:3.5.17"},
+							},
+						},
+					},
+				},
+			},
+			req: ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}},
+			assert: func(t *testing.T, state *reconcileState, res ctrl.Result, err error, ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet) {
+				require.NotNil(t, state)
+				assert.NoError(t, err)
+				assert.Equal(t, ctrl.Result{}, res)
+			},
+		},
+		{
+			// The template may name a version that never ran (phantom patch
+			// tag); validation runs against the observed cluster version so
+			// reverting spec.version is not misread as a downgrade.
+			name: "Rollback to observed version allowed despite bad template tag",
+			ec: &ecv1alpha1.EtcdCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "etcd",
+					Namespace: "default",
+					UID:       "2",
+				},
+				Spec:   ecv1alpha1.EtcdClusterSpec{Size: 1, Version: "3.5.17"},
+				Status: ecv1alpha1.EtcdClusterStatus{CurrentVersion: "3.5.17"},
+			},
+			sts: &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "etcd",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: ecv1alpha1.GroupVersion.String(),
+							Kind:       "EtcdCluster",
+							Name:       "etcd",
+							UID:        "2",
+							Controller: pointerToBool(true),
+						},
+					},
+				},
+				Spec: appsv1.StatefulSetSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Image: "gcr.io/etcd-development/etcd:3.6.99"},
 							},
 						},
 					},
@@ -259,7 +313,7 @@ func TestFetchAndValidateState(t *testing.T) {
 			},
 			req: ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}},
 			assert: func(t *testing.T, state *reconcileState, res ctrl.Result, err error, ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet) {
-				require.Nil(t, state)
+				require.NotNil(t, state)
 				assert.Error(t, err)
 				assert.Equal(t, ctrl.Result{}, res)
 			},
@@ -300,7 +354,7 @@ func TestFetchAndValidateState(t *testing.T) {
 			},
 			req: ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}},
 			assert: func(t *testing.T, state *reconcileState, res ctrl.Result, err error, ec *ecv1alpha1.EtcdCluster, sts *appsv1.StatefulSet) {
-				require.Nil(t, state)
+				require.NotNil(t, state)
 				assert.Error(t, err)
 				assert.Equal(t, ctrl.Result{}, res)
 			},
@@ -453,7 +507,10 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 
 	ctx := t.Context()
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(ec).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		Build()
 	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}}
@@ -465,6 +522,91 @@ func TestFetchAndValidateStateClientCertificateError(t *testing.T) {
 	assert.NoError(t, err, "the failure should be surfaced via requeue, not a returned error")
 	assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res, "expected a requeue with backoff")
 	assert.NotZero(t, res.RequeueAfter, "RequeueAfter must be non-zero")
+
+	// The nil-error requeue bypasses the deferred updateStatus; the direct
+	// status write must still surface the failure as conditions.
+	assertClientCertificateFailureConditions(t, ctx, fakeClient, req.NamespacedName)
+}
+
+// TestReconcileUnparseableValidityDurationSurfacesStatus reproduces the live gap:
+// a client surface whose certManagerCfg.validityDuration is unparseable is
+// admitted, then createClientCertificate fails on every reconcile via a nil-error
+// requeue that bypasses the deferred updateStatus. Full Reconcile must still
+// leave a non-empty .status: Degraded=True and TLSReady=False, both with reason
+// ClientCertificateError.
+func TestReconcileUnparseableValidityDurationSurfacesStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+	_ = certv1.AddToScheme(scheme)
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "etcd",
+			Namespace:  "default",
+			UID:        "1",
+			Generation: 1,
+		},
+		Spec: ecv1alpha1.EtcdClusterSpec{
+			Size:    1,
+			Version: "3.5.17",
+			TLS: &ecv1alpha1.EtcdClusterTLS{
+				Client: &ecv1alpha1.TLSSurface{
+					Provider: "cert-manager",
+					ProviderCfg: ecv1alpha1.ProviderConfig{
+						CertManagerCfg: &ecv1alpha1.ProviderCertManagerConfig{
+							CommonConfig: ecv1alpha1.CommonConfig{
+								ValidityDuration: "garbage",
+							},
+							IssuerKind: "Issuer",
+							IssuerName: "test-issuer",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := t.Context()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(ec).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		Build()
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "etcd", Namespace: "default"}}
+	res, err := r.Reconcile(ctx, req)
+
+	assert.NoError(t, err, "the failure should be surfaced via requeue, not a returned error")
+	assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res, "expected a requeue with backoff")
+
+	assertClientCertificateFailureConditions(t, ctx, fakeClient, req.NamespacedName)
+}
+
+// assertClientCertificateFailureConditions asserts the persisted status of the
+// named cluster carries Degraded=True and TLSReady=False, both with reason
+// ClientCertificateError, and a matching observedGeneration.
+func assertClientCertificateFailureConditions(t *testing.T, ctx context.Context, c client.Client, key types.NamespacedName) {
+	t.Helper()
+
+	got := &ecv1alpha1.EtcdCluster{}
+	require.NoError(t, c.Get(ctx, key, got))
+	require.NotEmpty(t, got.Status.Conditions, ".status.conditions must not be left empty")
+	assert.Equal(t, got.Generation, got.Status.ObservedGeneration)
+
+	degraded := meta.FindStatusCondition(got.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded, "Degraded condition must be set")
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, reasonClientCertificateError, degraded.Reason)
+	assert.NotEmpty(t, degraded.Message)
+	assert.Equal(t, got.Generation, degraded.ObservedGeneration)
+
+	tlsReady := meta.FindStatusCondition(got.Status.Conditions, tlsReadyConditionType)
+	require.NotNil(t, tlsReady, "TLSReady condition must be set")
+	assert.Equal(t, metav1.ConditionFalse, tlsReady.Status)
+	assert.Equal(t, reasonClientCertificateError, tlsReady.Reason)
 }
 
 // TestBootstrapStatefulSet outlines tests for ensuring StatefulSet and Service
@@ -675,4 +817,533 @@ func TestSetupWithManagerThreadsMaxConcurrentReconciles(t *testing.T) {
 			assert.Equal(t, tt.maxConcurrentReconciles, r.MaxConcurrentReconciles)
 		})
 	}
+}
+
+// TestReconcileErrorSetsDegradedCondition verifies that a reconcile error is
+// surfaced on the EtcdCluster status as a Degraded=True condition instead of
+// leaving the status empty.
+func TestReconcileErrorSetsDegradedCondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd",
+			Namespace: "default",
+			UID:       "1",
+		},
+		Spec: ecv1alpha1.EtcdClusterSpec{
+			Size:    1,
+			Version: "3.5.17",
+			TLS: &ecv1alpha1.EtcdClusterTLS{
+				// The peer surface: a client-surface cert failure requeues without
+				// an error in fetchAndValidateState, so it would never reach the
+				// Degraded path this test covers.
+				Peer: &ecv1alpha1.TLSSurface{
+					Provider: "auto",
+					ProviderCfg: ecv1alpha1.ProviderConfig{
+						AutoCfg: &ecv1alpha1.ProviderAutoConfig{
+							CommonConfig: ecv1alpha1.CommonConfig{
+								ValidityDuration: "90days", // not a valid time.Duration
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		WithObjects(ec).
+		Build()
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+
+	_, err := r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ec.Name, Namespace: ec.Namespace},
+	})
+	require.Error(t, err)
+
+	updated := &ecv1alpha1.EtcdCluster{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(ec), updated))
+
+	degraded := meta.FindStatusCondition(updated.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, "ReconcileFailed", degraded.Reason)
+	assert.Contains(t, degraded.Message, "failed to parse ValidityDuration")
+}
+
+// TestReconcileNotOwnedStatefulSetStatus verifies that when reconciliation
+// fails because the StatefulSet is not owned by the EtcdCluster, the status
+// reports Degraded=ReconcileFailed without leaking the foreign StatefulSet's
+// replica counts or a Progressing=ScalingInProgress condition.
+func TestReconcileNotOwnedStatefulSetStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd",
+			Namespace: "default",
+			UID:       "1",
+		},
+		Spec: ecv1alpha1.EtcdClusterSpec{Size: 3, Version: "3.5.17"},
+	}
+	replicas := int32(5)
+	foreignSTS := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd",
+			Namespace: "default",
+		},
+		Spec:   appsv1.StatefulSetSpec{Replicas: &replicas},
+		Status: appsv1.StatefulSetStatus{ReadyReplicas: replicas},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).
+		WithObjects(ec, foreignSTS).
+		Build()
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+
+	_, err := r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ec.Name, Namespace: ec.Namespace},
+	})
+	require.Error(t, err)
+
+	updated := &ecv1alpha1.EtcdCluster{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(ec), updated))
+
+	degraded := meta.FindStatusCondition(updated.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, "ReconcileFailed", degraded.Reason)
+
+	assert.Equal(t, int32(0), updated.Status.CurrentReplicas)
+	assert.Equal(t, int32(0), updated.Status.ReadyReplicas)
+	progressing := meta.FindStatusCondition(updated.Status.Conditions, "Progressing")
+	require.NotNil(t, progressing)
+	assert.Equal(t, metav1.ConditionFalse, progressing.Status)
+	assert.NotEqual(t, "ScalingInProgress", progressing.Reason)
+}
+
+// TestUpdateConditionsReconcileError verifies that a reconcile error forces
+// Degraded=ReconcileFailed even when all members are healthy, and that
+// Degraded reverts to False once the error clears.
+func TestUpdateConditionsReconcileError(t *testing.T) {
+	healthyState := func() *reconcileState {
+		return &reconcileState{
+			cluster: &ecv1alpha1.EtcdCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "etcd", Namespace: "default"},
+				Spec:       ecv1alpha1.EtcdClusterSpec{Size: 1, Version: "3.5.17"},
+			},
+			memberListResp: &clientv3.MemberListResponse{
+				Members: []*etcdserverpb.Member{{ID: 1, Name: "etcd-0"}},
+			},
+			memberHealth: []etcdutils.EpHealth{
+				{
+					Ep:     "http://etcd-0:2379",
+					Health: true,
+					Status: &clientv3.StatusResponse{
+						Header: &etcdserverpb.ResponseHeader{MemberId: 1},
+						Leader: 1,
+					},
+				},
+			},
+		}
+	}
+	r := &EtcdClusterReconciler{}
+
+	s := healthyState()
+	r.updateConditions(s, errors.New("couldn't find leader"))
+	degraded := meta.FindStatusCondition(s.cluster.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, "ReconcileFailed", degraded.Reason)
+	assert.Equal(t, "couldn't find leader", degraded.Message)
+
+	r.updateConditions(s, nil)
+	degraded = meta.FindStatusCondition(s.cluster.Status.Conditions, "Degraded")
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionFalse, degraded.Status)
+	assert.Equal(t, "ClusterHealthy", degraded.Reason)
+}
+
+// TestUpdateStatusMemberHealthCorrelation verifies that member statuses are
+// correlated with health reports by member ID. The member list from etcd is
+// ordered by member ID while the health report is ordered by endpoint, so the
+// two lists cannot be paired by index.
+func TestUpdateStatusMemberHealthCorrelation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd",
+			Namespace: "default",
+		},
+		Spec: ecv1alpha1.EtcdClusterSpec{Size: 3, Version: "3.5.17"},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ec).
+		WithStatusSubresource(ec).
+		Build()
+	r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+
+	// etcd-2 is the leader and has the lowest member ID, so it comes first in
+	// the ID-ordered member list while its health entry comes last in the
+	// endpoint-ordered health report.
+	const (
+		leaderID    uint64 = 0x100 // etcd-2
+		followerID0 uint64 = 0x200 // etcd-0
+		followerID1 uint64 = 0x300 // etcd-1
+	)
+
+	state := &reconcileState{
+		cluster: ec,
+		memberListResp: &clientv3.MemberListResponse{
+			Members: []*etcdserverpb.Member{
+				{ID: leaderID, Name: "etcd-2"},
+				{ID: followerID0, Name: "etcd-0"},
+				{ID: followerID1, Name: "etcd-1"},
+			},
+		},
+		memberHealth: []etcdutils.EpHealth{
+			{
+				Ep:     "http://etcd-0.etcd.default.svc.cluster.local:2379",
+				Health: true,
+				Status: &clientv3.StatusResponse{
+					Header:  &etcdserverpb.ResponseHeader{MemberId: followerID0},
+					Leader:  leaderID,
+					Version: "3.5.17",
+				},
+			},
+			{
+				Ep:     "http://etcd-1.etcd.default.svc.cluster.local:2379",
+				Health: true,
+				Status: &clientv3.StatusResponse{
+					Header:  &etcdserverpb.ResponseHeader{MemberId: followerID1},
+					Leader:  leaderID,
+					Version: "3.5.16",
+				},
+			},
+			{
+				Ep:     "http://etcd-2.etcd.default.svc.cluster.local:2379",
+				Health: true,
+				Status: &clientv3.StatusResponse{
+					Header:  &etcdserverpb.ResponseHeader{MemberId: leaderID},
+					Leader:  leaderID,
+					Version: "3.5.17",
+				},
+			},
+		},
+	}
+
+	require.NoError(t, r.updateStatus(t.Context(), state, nil))
+
+	status := ec.Status
+	assert.Equal(t, fmt.Sprintf("%x", leaderID), status.LeaderID)
+	require.Len(t, status.Members, 3)
+
+	leaders := 0
+	for _, m := range status.Members {
+		if m.IsLeader {
+			leaders++
+			assert.Equal(t, status.LeaderID, m.ID, "isLeader member must match status.leaderID")
+		}
+	}
+	assert.Equal(t, 1, leaders, "exactly one member should be leader")
+
+	byName := map[string]ecv1alpha1.MemberStatus{}
+	for _, m := range status.Members {
+		byName[m.Name] = m
+	}
+	assert.True(t, byName["etcd-2"].IsLeader)
+	assert.False(t, byName["etcd-0"].IsLeader)
+	assert.False(t, byName["etcd-1"].IsLeader)
+	assert.Equal(t, "3.5.17", byName["etcd-0"].Version)
+	assert.Equal(t, "3.5.16", byName["etcd-1"].Version)
+	assert.Equal(t, "3.5.17", byName["etcd-2"].Version)
+	for _, m := range status.Members {
+		assert.True(t, m.IsHealthy, "member %s should be healthy", m.Name)
+	}
+}
+
+func nospaceTestState(alarms []etcdutils.MemberAlarm) *reconcileState {
+	return &reconcileState{
+		cluster: &ecv1alpha1.EtcdCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "etcd", Namespace: "default"},
+		},
+		memberListResp: &clientv3.MemberListResponse{
+			Members: []*etcdserverpb.Member{
+				{ID: 1, Name: "etcd-0"},
+				{ID: 2, Name: "etcd-1"},
+			},
+		},
+		memberHealth: []etcdutils.EpHealth{
+			{Ep: "ep0", Health: false, Status: &clientv3.StatusResponse{
+				Header: &etcdserverpb.ResponseHeader{MemberId: 1},
+			}},
+			{Ep: "ep1", Health: true, Status: &clientv3.StatusResponse{
+				Header: &etcdserverpb.ResponseHeader{MemberId: 2},
+			}},
+		},
+		alarms: alarms,
+	}
+}
+
+func TestUpdateConditionsNospaceAlarm(t *testing.T) {
+	r := &EtcdClusterReconciler{}
+
+	t.Run("NospaceAlarmSetsDistinctReason", func(t *testing.T) {
+		s := nospaceTestState([]etcdutils.MemberAlarm{{MemberID: 1, Type: "NOSPACE"}})
+		r.updateConditions(s, nil)
+
+		cond := meta.FindStatusCondition(s.cluster.Status.Conditions, "Degraded")
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		assert.Equal(t, "DatabaseQuotaExceeded", cond.Reason)
+		assert.Contains(t, cond.Message, "etcd-0")
+	})
+
+	t.Run("UnhealthyWithoutAlarmKeepsGenericReason", func(t *testing.T) {
+		s := nospaceTestState(nil)
+		r.updateConditions(s, nil)
+
+		cond := meta.FindStatusCondition(s.cluster.Status.Conditions, "Degraded")
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		assert.Equal(t, "UnhealthyMembers", cond.Reason)
+	})
+}
+
+func TestReportNospaceAlarms(t *testing.T) {
+	t.Run("EmitsWarningEvent", func(t *testing.T) {
+		rec := events.NewFakeRecorder(10)
+		r := &EtcdClusterReconciler{Recorder: rec}
+		s := nospaceTestState([]etcdutils.MemberAlarm{{MemberID: 1, Type: "NOSPACE"}})
+
+		r.reportNospaceAlarms(s)
+
+		require.Len(t, rec.Events, 1)
+		ev := <-rec.Events
+		assert.Contains(t, ev, corev1.EventTypeWarning)
+		assert.Contains(t, ev, "DatabaseQuotaExceeded")
+		assert.Contains(t, ev, "etcd-0")
+	})
+
+	t.Run("NilRecorderDoesNotPanic", func(t *testing.T) {
+		r := &EtcdClusterReconciler{}
+		s := nospaceTestState([]etcdutils.MemberAlarm{{MemberID: 1, Type: "NOSPACE"}})
+		assert.NotPanics(t, func() { r.reportNospaceAlarms(s) })
+	})
+
+	t.Run("NonNospaceAlarmEmitsNothing", func(t *testing.T) {
+		rec := events.NewFakeRecorder(10)
+		r := &EtcdClusterReconciler{Recorder: rec}
+		s := nospaceTestState([]etcdutils.MemberAlarm{{MemberID: 2, Type: "CORRUPT"}})
+
+		r.reportNospaceAlarms(s)
+
+		assert.Empty(t, rec.Events)
+	})
+}
+
+func memberListRespWithCount(n int) *clientv3.MemberListResponse {
+	members := make([]*etcdserverpb.Member, n)
+	for i := range members {
+		members[i] = &etcdserverpb.Member{ID: uint64(i + 1), Name: fmt.Sprintf("etcd-%d", i)}
+	}
+	return &clientv3.MemberListResponse{Members: members}
+}
+
+// TestReconcileClusterStateGates verifies the observed-generation/settled gates
+// in reconcileClusterState. The tests run without a live etcd cluster: passing
+// without one proves the gates fire before any membership call.
+func TestReconcileClusterStateGates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	newCluster := func(size int) *ecv1alpha1.EtcdCluster {
+		return &ecv1alpha1.EtcdCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "etcd", Namespace: "default", UID: "1"},
+			Spec:       ecv1alpha1.EtcdClusterSpec{Size: size, Version: "3.5.17"},
+		}
+	}
+	newSTS := func(generation, observedGen int64, replicas, readyReplicas int32) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "etcd", Namespace: "default", Generation: generation},
+			Spec:       appsv1.StatefulSetSpec{Replicas: pointerToInt32(replicas)},
+			Status: appsv1.StatefulSetStatus{
+				ObservedGeneration: observedGen,
+				ReadyReplicas:      readyReplicas,
+			},
+		}
+	}
+
+	t.Run("stale generation requeues without writes", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(5)
+		sts := newSTS(2, 1, 3, 3)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, sts).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+
+		stored := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, stored))
+		oldRV := stored.ResourceVersion
+
+		state := &reconcileState{cluster: ec, sts: stored, memberListResp: memberListRespWithCount(3)}
+		res, err := r.reconcileClusterState(ctx, state)
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res)
+
+		after := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, after))
+		assert.Equal(t, oldRV, after.ResourceVersion)
+	})
+
+	t.Run("unsettled replicas requeue before scale-out", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(5)
+		sts := newSTS(1, 1, 3, 2)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, sts).Build()
+		recorder := events.NewFakeRecorder(10)
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme, Recorder: recorder}
+
+		stored := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, stored))
+		oldRV := stored.ResourceVersion
+
+		state := &reconcileState{cluster: ec, sts: stored, memberListResp: memberListRespWithCount(3)}
+		res, err := r.reconcileClusterState(ctx, state)
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res)
+
+		after := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, after))
+		assert.Equal(t, oldRV, after.ResourceVersion)
+
+		select {
+		case ev := <-recorder.Events:
+			assert.Contains(t, ev, "StatefulSetNotSettled")
+		default:
+			t.Fatal("expected a StatefulSetNotSettled warning event")
+		}
+	})
+
+	t.Run("spec-driven scale-in is exempt from the settled gate", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(1)
+		sts := newSTS(1, 1, 3, 2) // e.g. last pod NotReady while its etcd still answers
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, sts).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+
+		stored := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, stored))
+
+		// Leaderless health data: reconcile must pass the gate and fail on the leader
+		// lookup, proving the gate did not requeue the scale-in.
+		health := make([]etcdutils.EpHealth, 3)
+		for i := range health {
+			health[i] = etcdutils.EpHealth{
+				Health: true,
+				Status: &clientv3.StatusResponse{
+					Header: &etcdserverpb.ResponseHeader{MemberId: uint64(i + 1)},
+					Leader: 99,
+				},
+			}
+		}
+
+		state := &reconcileState{cluster: ec, sts: stored, memberListResp: memberListRespWithCount(3), memberHealth: health}
+		_, err := r.reconcileClusterState(ctx, state)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "couldn't find leader")
+	})
+
+	t.Run("interrupted scale-in recovery is not gated", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(2)
+		// Member already removed but StatefulSet not yet shrunk: the orphaned pod can
+		// never become ready, so recovery must run before the settled gate.
+		sts := newSTS(1, 1, 3, 2)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, sts).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+
+		stored := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, stored))
+
+		state := &reconcileState{cluster: ec, sts: stored, memberListResp: memberListRespWithCount(2)}
+		res, err := r.reconcileClusterState(ctx, state)
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res)
+
+		after := &appsv1.StatefulSet{}
+		require.NoError(t, fakeClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, after))
+		assert.Equal(t, int32(2), *after.Spec.Replicas)
+	})
+}
+
+// TestReconcileClusterStateStaleGenerationEnvtest exercises the stale-generation
+// gate against real API-server generation semantics: envtest runs no
+// kube-controller-manager, so Status.ObservedGeneration stays 0 while
+// Generation is 1 after creation.
+func TestReconcileClusterStateStaleGenerationEnvtest(t *testing.T) {
+	ctx := t.Context()
+
+	ec := &ecv1alpha1.EtcdCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "gate-envtest", Namespace: "default"},
+		Spec:       ecv1alpha1.EtcdClusterSpec{Size: 1, Version: "3.5.17"},
+	}
+	require.NoError(t, k8sClient.Create(ctx, ec))
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, ec) })
+
+	labels := map[string]string{"app": ec.Name}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ec.Name,
+			Namespace: ec.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: ecv1alpha1.GroupVersion.String(),
+				Kind:       "EtcdCluster",
+				Name:       ec.Name,
+				UID:        ec.UID,
+				Controller: pointerToBool(true),
+			}},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas:    pointerToInt32(1),
+			ServiceName: ec.Name,
+			Selector:    &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "etcd", Image: "gcr.io/etcd-development/etcd:3.5.17"}},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, sts))
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, sts) })
+
+	fetched := &appsv1.StatefulSet{}
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKey{Name: ec.Name, Namespace: ec.Namespace}, fetched))
+	require.Equal(t, int64(1), fetched.Generation)
+	require.Equal(t, int64(0), fetched.Status.ObservedGeneration)
+
+	r := &EtcdClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	state := &reconcileState{cluster: ec, sts: fetched, memberListResp: memberListRespWithCount(1)}
+
+	res, err := r.reconcileClusterState(ctx, state)
+	assert.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: requeueDuration}, res)
 }

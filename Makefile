@@ -86,9 +86,14 @@ test: manifests generate fmt vet envtest ## Run tests.
 # Prometheus and CertManager are installed by default; skip with:
 # - PROMETHEUS_INSTALL_SKIP=true
 # - CERT_MANAGER_INSTALL_SKIP=true
+# Explicit -timeout: the features' worst-case wait ceilings sum past the go-test default of 10m,
+# and the EtcdMirror lifecycle scenarios push the sum past 30m. A pathologically slow run can
+# still exceed 75m while every wait is inside its ceiling; go-test then panics with no teardown
+# or diagnostics. Reruns self-heal (each feature Setup purges its leftover namespace), but the
+# kind cluster leaks — delete it manually.
 .PHONY: test-e2e
 test-e2e: generate fmt vet kind gofail-enable ## Run the e2e tests. Expected an isolated environment using Kind.
-	ETCD_VERSION="$(E2E_ETCD_VERSION)" PATH="$(LOCALBIN):$(PATH)" go test ./test/e2e/ -v
+	ETCD_VERSION="$(E2E_ETCD_VERSION)" PATH="$(LOCALBIN):$(PATH)" go test ./test/e2e/ -v -timeout 75m
 	$(MAKE) gofail-disable
 
 # The stress suite is build-tagged (//go:build stress) so the fast e2e suite
@@ -134,12 +139,13 @@ verify: verify-mod-tidy lint ## Run static checks against the code.
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: manifests generate fmt vet ## Build manager and mirror-agent binaries.
+	go build -o bin/manager ./cmd
+	go build -o bin/mirror-agent ./cmd/mirror-agent
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -289,3 +295,26 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
+
+##@ Helm Chart
+
+HELM ?= helm
+HELM_CHART = charts/etcd-operator
+
+.PHONY: helm-crds
+helm-crds: ## Copy config/crd/bases into the chart's templates/crds, wrapped in a crds.enabled guard. Run after `make manifests`.
+	@mkdir -p $(HELM_CHART)/templates/crds
+	@rm -f $(HELM_CHART)/templates/crds/*.yaml
+	@for f in config/crd/bases/*.yaml; do \
+		out=$(HELM_CHART)/templates/crds/$$(basename $$f); \
+		echo "syncing $$f -> $$out"; \
+		{ \
+			echo '{{- if .Values.crds.enabled }}'; \
+			sed -e 's/{{/{{ "{{" }}/g' $$f; \
+			echo '{{- end }}'; \
+		} > $$out; \
+	done
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart.
+	$(HELM) lint $(HELM_CHART)

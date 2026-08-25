@@ -199,7 +199,7 @@ func TestTLSIndependenceArgsMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ec := clusterWithTLS(name, tt.tls)
-			got := createArgs(name, nil, tlsArgsFor(ec))
+			got := createArgs(ec)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
@@ -236,7 +236,8 @@ func stsContainer(t *testing.T, ec *ecv1alpha1.EtcdCluster) (corev1.Container, [
 	t.Helper()
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	require.NoError(t, createOrPatchStatefulSet(t.Context(), discardLogger(), ec, c, 1, scheme))
+	_, err := createOrPatchStatefulSet(t.Context(), discardLogger(), ec, c, 1, scheme)
+	require.NoError(t, err)
 	sts, err := getStatefulSet(t.Context(), c, ec.Name, ec.Namespace)
 	require.NoError(t, err)
 	require.Len(t, sts.Spec.Template.Spec.Containers, 1)

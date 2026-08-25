@@ -29,8 +29,24 @@ rules:
   - patch
   - update
 - apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -62,9 +78,16 @@ rules:
   - list
   - watch
 - apiGroups:
-  - operator.etcd.io
+  - events.k8s.io
   resources:
-  - etcdclusters
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - podmonitors
   verbs:
   - create
   - delete
@@ -76,14 +99,47 @@ rules:
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups
+  - etcdclusters
+  - etcdmirrors
+  - etcdrestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - operator.etcd.io
+  resources:
+  - etcdbackups/finalizers
   - etcdclusters/finalizers
+  - etcdmirrors/finalizers
+  - etcdrestores/finalizers
   verbs:
   - update
 - apiGroups:
   - operator.etcd.io
   resources:
+  - etcdbackups/status
   - etcdclusters/status
+  - etcdmirrors/status
+  - etcdrestores/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
