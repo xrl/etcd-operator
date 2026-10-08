@@ -57,33 +57,17 @@ git push fork v0.1.0-pre.0
 The operator keeps its real `healthz`/`readyz` probes (`cmd/main.go`); nothing about
 health is faked in the image.
 
-## Viasat pull-through path (GKE / ndp-us-dev)
+## Corporate pull-through path
 
-Viasat does **not** pull from Docker Hub directly. Docker Hub images are mirrored
-into the Viasat ecosystem through **Artifactory's Docker Hub pull-through cache**, and
-GKE / `ndp-us-dev` pulls from that Artifactory host.
-
-Confirmed Artifactory patterns (from the ENTSR wiki audit):
-
-- Viasat Artifactory docker repos resolve as
-  `<repo>.docker.artifactory.viasat.com/<image>:<tag>`.
-- The KVS team's GKE registry is `kvs-docker-prod.docker.artifactory.viasat.com`,
-  and it already remaps Docker Hub images. Wiki precedent:
-  `docker.io/bitnamilegacy/etcd` → `kvs-docker-prod.docker.artifactory.viasat.com/etcd:3.5.29-bitnami`.
-
-So once `docker.io/xrlx/etcd-operator:<tag>` is published, the Viasat-side pull is:
+Some environments do not pull from Docker Hub directly; they go through an
+Artifactory (or similar) Docker Hub pull-through cache. Once
+`docker.io/xrlx/etcd-operator:<tag>` is published, the pull is:
 
 ```
-<artifactory-dockerhub-cache-host>/xrlx/etcd-operator:<tag>
+<dockerhub-cache-host>/xrlx/etcd-operator:<tag>
 ```
 
-> **CONFIRM THE EXACT HOSTNAME.** The specific `docker-hub-remote` (pull-through)
-> hostname was **not** present in the ENTSR wiki audit. Read it from Artifactory's
-> **"Set Me Up"** UI for the Docker Hub remote/virtual repo, or ask the platform /
-> KVS team, before wiring it into any manifest. Do not guess it from the
-> `kvs-docker-prod` example above — that is the KVS GKE registry, not necessarily the
-> Docker Hub pull-through endpoint.
-
-The `ndp-argo` ApplicationSet should reference that pull-through path **by digest**
-(LAWS-4), e.g. `<artifactory-dockerhub-cache-host>/xrlx/etcd-operator@sha256:...`,
+Read the exact pull-through hostname from the registry's own setup page; do not
+guess it from another team's registry host. GitOps manifests should reference
+the image **by digest** (`<dockerhub-cache-host>/xrlx/etcd-operator@sha256:...`),
 not by floating tag.
